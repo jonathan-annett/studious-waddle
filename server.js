@@ -1831,7 +1831,7 @@ async function playFolder(tvIP, folder, session, monitorId, restoreInput = 0x11,
   log('info', `[player/play] playerIP=${playerIP}`);
 
   // Check folder contents
-  const { fileCount, files } = await getPlayerFolderContents(playerIP, folder);
+  const { fileCount } = await getPlayerFolderContents(playerIP, folder);
   log('info', `[player/play] fileCount=${fileCount}`);
   if (fileCount === 0) {
     return { ok: false, error: 'folder is empty', folder: folderPath };
@@ -1841,33 +1841,55 @@ async function playFolder(tvIP, folder, session, monitorId, restoreInput = 0x11,
   const chosenInterval = fileCount === 1 ? INTERVAL_INFINITE : interval;
   log('info', `[player/play] interval=${chosenInterval}s (${fileCount} file(s))`);
 
-  // Read current input
-  let currentInput = null;
-  if (session) {
+  // If no persistent session was supplied, open a temporary one for the TV input operations.
+  // This allows badge-clicks (and other sessionless callers) to still switch the TV input.
+  let tempSession = null;
+  let activeSess  = session;
+  const activeMid = monitorId ?? 1;
+  if (!activeSess) {
+    log('info', `[player/play] no session — opening temporary NEC connection to ${tvIP}`);
     try {
-      const inp  = await session.vcpGet(monitorId, 0x00, 0x60);
-      currentInput = inp.current;
-      log('info', `[player/play] current input=0x${currentInput.toString(16)}`);
+      tempSession = await openTcpSession(tvIP, { port: 7142 });
+      activeSess  = tempSession;
     } catch(e) {
-      log('warn', `[player/play] could not read input: ${e.message}`);
+      log('warn', `[player/play] temporary session failed (${e.message}) — input switch skipped`);
     }
   }
 
-  // If already on MP, bounce away first so the player picks up the new folder
-  if (currentInput === MEDIA_PLAYER_INPUT && session) {
-    log('info', `[player/play] already on MP — bouncing to 0x${restoreInput.toString(16)} first`);
-    await session.vcpSet(monitorId, 0x00, 0x60, restoreInput);
-    await new Promise(r => setTimeout(r, 800));
-  }
+  try {
+    // Read current TV input
+    let currentInput = null;
+    if (activeSess) {
+      try {
+        const inp  = await activeSess.vcpGet(activeMid, 0x00, 0x60);
+        currentInput = inp.current;
+        log('info', `[player/play] current input=0x${currentInput.toString(16)}`);
+      } catch(e) {
+        log('warn', `[player/play] could not read input: ${e.message}`);
+      }
+    }
 
-  await setAutoPlay(playerIP, folderPath);
-  await setSlideInterval(playerIP, chosenInterval);
-  await restartPlayer(playerIP);
+    // If already on MP, bounce away first so the player picks up the new folder
+    if (currentInput === MEDIA_PLAYER_INPUT && activeSess) {
+      log('info', `[player/play] already on MP — bouncing to 0x${restoreInput.toString(16)} first`);
+      await activeSess.vcpSet(activeMid, 0x00, 0x60, restoreInput);
+      await new Promise(r => setTimeout(r, 800));
+    }
 
-  // Switch TV input to MP
-  if (session) {
-    const r = await session.vcpSet(monitorId, 0x00, 0x60, MEDIA_PLAYER_INPUT);
-    log('info', `[player/play] input switch to MP -> ${JSON.stringify(r)}`);
+    await setAutoPlay(playerIP, folderPath);
+    await setSlideInterval(playerIP, chosenInterval);
+    await restartPlayer(playerIP);
+
+    // Switch TV input to MP
+    if (activeSess) {
+      const r = await activeSess.vcpSet(activeMid, 0x00, 0x60, MEDIA_PLAYER_INPUT);
+      log('info', `[player/play] input switch to MP -> ${JSON.stringify(r)}`);
+    }
+  } finally {
+    if (tempSession) {
+      await tempSession.close().catch(() => {});
+      log('info', `[player/play] temporary session closed`);
+    }
   }
 
   return { ok: true, tvIP, playerIP, folder: folderPath, fileCount, interval: chosenInterval };
