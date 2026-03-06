@@ -28,7 +28,7 @@
 
   html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 13px; }
 
-  body { display: grid; grid-template-rows: 48px 1fr; grid-template-columns: 1fr 340px; height: 100vh; overflow: hidden; }
+  body { display: grid; grid-template-rows: 48px auto 1fr; grid-template-columns: 1fr 340px; height: 100vh; overflow: hidden; }
   #content-area { overflow-y: auto; display: flex; flex-direction: column; }
 
   /* ── Header ── */
@@ -66,9 +66,39 @@
   main { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
   #scanner-wrap { padding: 12px 20px 0; }
 
+  /* ── Schedule status bar ── */
+  #sched-bar {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    font-family: var(--mono);
+    font-size: 10px;
+    line-height: 1.6;
+    padding: 5px 20px;
+    background: #0d0f14;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    color: var(--text);
+  }
+  #sched-bar .sb-live-dot {
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
+    animation: pulse 2s ease-in-out infinite;
+    vertical-align: middle;
+    margin-right: 5px;
+  }
+  #sched-bar .sb-sep  { color: var(--muted); margin: 0 8px; }
+  #sched-bar .sb-next { color: var(--accent2); }
+  #sched-bar .sb-act  { color: var(--accent); }
+  #sched-bar .sb-dim  { color: var(--muted); }
+
   /* ── Log panel ── */
   #log-panel {
-    grid-row: 2;
+    grid-row: 3;
     border-left: 1px solid var(--border);
     display: flex; flex-direction: column;
     overflow: hidden;
@@ -172,6 +202,12 @@
   <span id="session-label" style="font-family:var(--mono);font-size:10px;color:var(--muted)"></span>
 </header>
 
+<div id="sched-bar">
+  <div id="sb-server">
+    <span class="sb-live-dot"></span><span class="sb-dim">Connecting…</span>
+  </div>
+</div>
+
 <div id="content-area">
   <div id="scanner-wrap">
     <div class="card" id="card-scanner"></div>
@@ -211,6 +247,7 @@ function initWs() {
   ws.onmessage = e => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'log') addLog(msg.entry);
+    if (msg.type === 'schedule-status') updateSchedBar(msg);
     if (msg.type === 'device-online') {
       deviceOnlineMap[msg.mac] = { ip: msg.ip, power: msg.power, name: msg.name };
       updateDeviceOnlineStatus(msg.mac);
@@ -225,6 +262,42 @@ function initWs() {
   ws.onclose = () => setTimeout(initWs, 2000);
 }
 initWs();
+
+function updateSchedBar(msg) {
+  const serverEl = document.getElementById('sb-server');
+  const activeEl = document.getElementById('sb-active');
+  if (!serverEl) return;
+
+  const t = new Date(msg.ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  let serverHtml = `<span class="sb-live-dot"></span>Server live &nbsp;${t}`;
+  if (msg.next) {
+    const m = msg.next.minsUntil;
+    const until = m < 60 ? `${m} min` : `${Math.floor(m / 60)}h ${m % 60}m`;
+    serverHtml += `<span class="sb-sep">·</span><span class="sb-next">Next: <strong>${esc(msg.next.eventName)}</strong> — ${esc(msg.next.subEventName)} on ${esc(msg.next.deviceName)} in ${until}</span>`;
+  } else {
+    serverHtml += `<span class="sb-sep">·</span><span class="sb-dim">No upcoming events</span>`;
+  }
+  serverEl.innerHTML = serverHtml;
+
+  if (!activeEl && msg.active?.length) {
+    const d = document.createElement('div');
+    d.id = 'sb-active';
+    serverEl.parentElement.appendChild(d);
+  }
+  const aEl = document.getElementById('sb-active');
+  if (aEl) {
+    if (msg.active?.length) {
+      const items = msg.active.map(a =>
+        `<span class="sb-act">● ${esc(a.subEventName)}</span> <span class="sb-dim">(${esc(a.eventName)}) on ${esc(a.deviceName)}</span>`
+      ).join('&ensp;·&ensp;');
+      aEl.innerHTML = `<span class="sb-dim">Active: </span>${items}`;
+      aEl.style.display = '';
+    } else {
+      aEl.style.display = 'none';
+    }
+  }
+}
 
 function addLog({ level, msg, data, ts }) {
   const el   = document.getElementById('log-entries');

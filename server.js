@@ -189,6 +189,50 @@ function getNextEvent(reg) {
 }
 
 /**
+ * Build a schedule status snapshot for broadcast to UI clients.
+ * Returns { ts, next, active } — safe to JSON-serialise.
+ */
+function buildScheduleStatus(reg) {
+  const now      = new Date();
+  const nextInfo = getNextEvent(reg);
+
+  const active = [];
+  for (const [, event] of Object.entries(reg.events || {})) {
+    for (const sub of event.subEvents || []) {
+      if (now >= new Date(sub.start) && now < new Date(sub.end)) {
+        const group = reg.groups?.[sub.groupId];
+        for (const mac of sub.devices || []) {
+          const device = reg.devices?.[mac];
+          active.push({
+            eventName:    event.name,
+            subEventName: sub.name,
+            deviceName:   device?.name || mac,
+            groupName:    group?.name  || sub.groupId,
+          });
+        }
+      }
+    }
+  }
+
+  return {
+    ts: now.getTime(),
+    next: nextInfo ? {
+      eventName:    nextInfo.event.name,
+      subEventName: nextInfo.subEvent.name,
+      deviceName:   nextInfo.device?.name || 'unknown',
+      minsUntil:    nextInfo.minsUntil,
+    } : null,
+    active,
+  };
+}
+
+/** Broadcast current schedule status to all connected UI clients. */
+function broadcastScheduleStatus() {
+  const reg = loadRegistry();
+  wsBroadcast({ type: 'schedule-status', ...buildScheduleStatus(reg) });
+}
+
+/**
  * Scheduler: check all event-involved devices and apply correct autoplay state.
  * Called every 60s and after event create/update/delete.
  */
@@ -289,6 +333,13 @@ function wsUpgrade(req, socket) {
   socket.on('error', () => wsClients.delete(socket));
   socket.on('close', () => wsClients.delete(socket));
   wsClients.add(socket);
+
+  // Push current schedule status immediately so new clients don't wait up to 60s
+  try {
+    const reg    = loadRegistry();
+    const status = buildScheduleStatus(reg);
+    socket.write(wsFrame(Buffer.from(JSON.stringify({ type: 'schedule-status', ...status }))));
+  } catch {}
 
   // We don't need to receive WS frames — server only pushes logs
 }
@@ -1360,6 +1411,7 @@ async function handleApi(method, pathname, body, req) {
 
     // Trigger scheduler to apply any immediately active sub-events
     checkSchedule().catch(() => {});
+    broadcastScheduleStatus();
 
     return { ok: true, id: eventId, event: proposed };
   }
@@ -1413,6 +1465,7 @@ async function handleApi(method, pathname, body, req) {
     }
 
     checkSchedule().catch(() => {});
+    broadcastScheduleStatus();
     return { ok: true, id, event: updated };
   }
 
@@ -1427,6 +1480,7 @@ async function handleApi(method, pathname, body, req) {
     log('info', `[events] Deleted event "${name}" (${id})`);
 
     checkSchedule().catch(() => {});
+    broadcastScheduleStatus();
     return { ok: true };
   }
 
@@ -1441,6 +1495,7 @@ async function handleApi(method, pathname, body, req) {
 
     reg.devices[mac].defaultGroup = groupId || null;
     saveRegistry(reg);
+    broadcastScheduleStatus();
 
     const active = getActiveSubEvent(mac, reg);
     if (active) {
@@ -2556,15 +2611,10 @@ server.listen(PORT, () => {
     checkSchedule().catch(e => log('warn', `[scheduler] tick failed: ${e.message}`));
   }, 60_000);
 
-  // Log countdown to next event every 60 seconds
-  setInterval(() => {
-    const reg = loadRegistry();
-    const next = getNextEvent(reg);
-    if (next) {
-      const devName = next.device?.name || 'unknown device';
-      log('info', `[scheduler] Next event: "${next.event.name}" — ${next.subEvent.name} on ${devName}, in ${next.minsUntil} min`);
-    }
-  }, 60_000);
+  // Broadcast schedule status to UI clients every 60 seconds (replaces log-based countdown).
+  // New clients also receive this immediately on WebSocket connect (see wsUpgrade).
+  broadcastScheduleStatus();
+  setInterval(broadcastScheduleStatus, 60_000);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
