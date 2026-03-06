@@ -176,18 +176,24 @@
 <script>
 // ─── state ─────────────────────────────────────────────────────────────────
 
-let sessionId  = null;
-let monitorId  = 1;
-let ws         = null;
-let lastData   = {};
+let sessionId       = null;
+let monitorId       = 1;
+let ws              = null;
+let lastData        = {};
+let deviceOnlineMap = {};      // { mac → { ip, power, name, ... } }
+let expandedDevice  = null;    // { mac } of currently expanded device card
 
-// ─── websocket log ──────────────────────────────────────────────────────────
+// ─── websocket log & device status ──────────────────────────────────────────
 
 function initWs() {
   ws = new WebSocket('ws://' + location.host);
   ws.onmessage = e => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'log') addLog(msg.entry);
+    if (msg.type === 'device-online') {
+      deviceOnlineMap[msg.mac] = { ip: msg.ip, power: msg.power, name: msg.name };
+      updateDeviceOnlineStatus(msg.mac);
+    }
   };
   ws.onclose = () => setTimeout(initWs, 2000);
 }
@@ -204,6 +210,29 @@ function addLog({ level, msg, data, ts }) {
 }
 
 function clearLog() { document.getElementById('log-entries').innerHTML = ''; }
+
+function updateDeviceOnlineStatus(mac) {
+  const macId = mac.replace(/:/g, '');
+  const el    = document.getElementById('am-dev-status-' + macId);
+  const info  = deviceOnlineMap[mac];
+  if (!el || !info) return;
+  el.innerHTML = `<span style="color:var(--accent)">●</span> ${esc(info.name || info.ip || mac)}`;
+}
+
+function toggleDeviceExpand(mac) {
+  const macId = mac.replace(/:/g, '');
+  const contentEl = document.getElementById('am-dev-content-' + macId);
+  if (!contentEl) return;
+  const isExpanded = contentEl.style.display !== 'none';
+  // Close any other expanded device
+  if (!isExpanded && expandedDevice && expandedDevice !== mac) {
+    const otherMacId = expandedDevice.replace(/:/g, '');
+    const otherEl = document.getElementById('am-dev-content-' + otherMacId);
+    if (otherEl) otherEl.style.display = 'none';
+  }
+  contentEl.style.display = isExpanded ? 'none' : 'block';
+  expandedDevice = isExpanded ? null : mac;
+}
 
 // ─── api helpers ────────────────────────────────────────────────────────────
 
@@ -1519,35 +1548,42 @@ function renderAmDevices(body) {
           </div>` : '';
         return `
         <div style="background:var(--bg);border:1px solid var(--border);border-radius:5px;
-             padding:12px;margin-bottom:8px">
-          <div style="display:flex;align-items:flex-start;gap:10px">
+             margin-bottom:8px;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:10px;padding:12px;cursor:pointer;
+               background:var(--surface);border-bottom:1px solid var(--border)"
+               onclick="toggleDeviceExpand('${dev.mac}')">
+            <span style="font-size:11px;color:var(--muted)">▼</span>
             <div style="flex:1;min-width:0">
-              <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px">
+              <div style="display:flex;align-items:baseline;gap:10px">
                 <span style="font-size:13px;font-weight:600;color:var(--text)">
                   ${esc(dev.name || dev.mac)}</span>
-                <span style="font-family:var(--mono);font-size:10px;color:var(--muted)">
-                  ${esc(dev.mac)}</span>
+                <span id="am-dev-status-${macId}" style="font-size:10px;color:var(--muted)">
+                  ○ unknown</span>
               </div>
-              ${dev.tvIp
-                ? `<div style="font-size:10px;color:var(--muted);margin-bottom:6px">
-                     TV&nbsp;IP: ${esc(dev.tvIp)}</div>` : ''}
-              <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
-                ${groupBadges}
-                ${devGids.length ? `<button class="btn-warn"
-                  style="font-size:10px;padding:1px 8px;border-radius:10px"
-                  onclick="amPlayerOff('${dev.tvIp || ''}','${macId}','${dev.mac}')"
-                  title="Turn off autoplay">■ Off</button>` : ''}
-                ${assignCtrl}
-              </div>
-              ${pushRow}
             </div>
             <div style="display:flex;gap:4px;flex-shrink:0">
               <button class="btn-secondary" style="font-size:10px;padding:2px 8px"
-                onclick="amEditDevice('${dev.mac}')">Edit</button>
+                onclick="amEditDevice('${dev.mac}'); event.stopPropagation();">Edit</button>
               <button class="btn-secondary"
                 style="font-size:10px;padding:2px 8px;color:var(--danger)"
-                onclick="amDeleteDevice('${dev.mac}')">Remove</button>
+                onclick="amDeleteDevice('${dev.mac}'); event.stopPropagation();">Remove</button>
             </div>
+          </div>
+          <div id="am-dev-content-${macId}" style="display:none;padding:12px;border-top:1px solid var(--border)">
+            ${dev.tvIp
+              ? `<div style="font-size:10px;color:var(--muted);margin-bottom:8px">
+                   TV&nbsp;IP: ${esc(dev.tvIp)}</div>` : ''}
+            <span style="font-family:var(--mono);font-size:10px;color:var(--muted)">
+              MAC: ${esc(dev.mac)}</span>
+            <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;margin-top:8px;margin-bottom:8px">
+              ${groupBadges}
+              ${devGids.length ? `<button class="btn-warn"
+                style="font-size:10px;padding:1px 8px;border-radius:10px"
+                onclick="amPlayerOff('${dev.tvIp || ''}','${macId}','${dev.mac}')"
+                title="Turn off autoplay">■ Off</button>` : ''}
+              ${assignCtrl}
+            </div>
+            ${pushRow}
           </div>
         </div>`;
       }).join('')}`;
