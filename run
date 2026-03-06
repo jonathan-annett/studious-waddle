@@ -1,0 +1,4 @@
+#!/bin/bash
+
+NEC_CACHE_DIR=/server/cache NEC_SUBNET=192.168.100 node server.js 4000
+
