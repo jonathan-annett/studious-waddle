@@ -1932,7 +1932,13 @@ function amNewEvent() {
 function amEditEvent(id) {
   const ev = amReg?.events?.[id];
   if (!ev) return;
-  amEventEdit = { _id: id, name: ev.name, subEvents: JSON.parse(JSON.stringify(ev.subEvents)) };
+  const subs = JSON.parse(JSON.stringify(ev.subEvents));
+  // Convert stored UTC times back to local for datetime-local inputs
+  for (const s of subs) {
+    s.start = utcToLocal(s.start);
+    s.end   = utcToLocal(s.end);
+  }
+  amEventEdit = { _id: id, name: ev.name, subEvents: subs };
   renderAssetManager();
 }
 
@@ -2078,11 +2084,18 @@ async function amSaveEvent() {
     if (!s.start || !s.end) { if (errEl) errEl.textContent = `Sub-event "${s.name || 'untitled'}" needs start and end times.`; return; }
   }
 
+  // Convert local times to UTC for storage
+  const subEventsUTC = e.subEvents.map(s => ({
+    ...s,
+    start: localToUTC(s.start),
+    end:   localToUTC(s.end),
+  }));
+
   try {
     if (e._id) {
-      await api('/events/' + e._id, { name: e.name, subEvents: e.subEvents }, 'PUT');
+      await api('/events/' + e._id, { name: e.name, subEvents: subEventsUTC }, 'PUT');
     } else {
-      await api('/events', { name: e.name, subEvents: e.subEvents });
+      await api('/events', { name: e.name, subEvents: subEventsUTC });
     }
     amEventEdit = null;
     await loadAssetManager();
@@ -2106,10 +2119,33 @@ function fmtDateTime(s) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
     d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
+
+// Timezone conversion: the UI works in the user's local timezone,
+// but we store/send UTC ISO strings so the server (which may be in a different TZ)
+// schedules correctly.
+
+/** Format a local Date as a datetime-local input value (YYYY-MM-DDTHH:MM). */
+function dateToLocal(d) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** Convert a datetime-local value (no TZ) to UTC ISO string for storage. */
+function localToUTC(dtLocal) {
+  if (!dtLocal) return dtLocal;
+  return new Date(dtLocal).toISOString();
+}
+
+/** Convert a UTC ISO string back to datetime-local format (for form inputs). */
+function utcToLocal(iso) {
+  if (!iso) return '';
+  return dateToLocal(new Date(iso));
+}
+
 function todayAtHour(h) {
   const d = new Date();
   d.setHours(h, 0, 0, 0);
-  return d.toISOString().slice(0, 16);
+  return dateToLocal(d);
 }
 
 // ─── util ────────────────────────────────────────────────────────────────────
