@@ -56,6 +56,42 @@ Key facts:
 
 ---
 
+## Firmware Quarantine
+
+`EXPECTED_FIRMWARE = '00R3.400'` is the only supported firmware version (defined as a constant
+in server.js). When any device is discovered on port 7142:
+
+1. `probeTvNec()` reads power, model, serial, **and firmware** in one probe session.
+2. If firmware is present and does not match `EXPECTED_FIRMWARE`, the device is stored in
+   `reg.quarantined[mac]` (not `reg.devices`) and a `device-quarantined` WebSocket event
+   is broadcast.
+3. Quarantined TVs are **never** used by the scheduler, player flow, or any other automation.
+4. When a quarantined TV reconnects, only its IP is updated and the `device-quarantined` event
+   is rebroadcast — no playback is attempted.
+5. If firmware cannot be read (older NEC firmware ignores `CA02`), the device is treated as
+   normal so existing devices are not accidentally blocked.
+
+### Registry structure
+
+```javascript
+quarantined: {
+  "<mac>": {
+    ip, discoveredAt, firmware,
+    model?, serial?
+  }
+}
+```
+
+### UI
+
+The **Quarantined TVs** card appears in `#scanner-wrap` (below the scanner and asset manager
+cards) whenever `reg.quarantined` is non-empty. It shows model, MAC, IP, actual firmware
+version, and two links per device:
+- `http://<tvIp>/updatefirmware.html` — NEC firmware update page
+- `http://<tvIp>/` — device web UI root (useful for very old firmware that may lack the update page)
+
+---
+
 ## Media Player HTTP API (Player side)
 
 All requests go to `http://<playerIP>/cgi-bin/cgictrl?<command>` via POST.
@@ -303,6 +339,11 @@ PUT    /api/events/:id       { name?, subEvents? } → update event
 DELETE /api/events/:id                        → delete event
 GET    /api/events/active                     → currently active sub-events
 POST   /api/devices/:mac/default-group  { groupId } → set default display group
+```
+
+### Firmware Quarantine
+```
+GET  /api/quarantined                    → { quarantined: [{ mac, ip, firmware, model, serial, discoveredAt }], expectedFirmware }
 ```
 
 ### Utilities

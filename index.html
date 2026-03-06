@@ -280,6 +280,7 @@ function initWs() {
       const el = document.getElementById('am-dev-status-' + macId);
       if (el) el.innerHTML = `<span style="color:var(--muted)">○</span> offline`;
     }
+    if (msg.type === 'device-quarantined') loadQuarantined();
   };
   ws.onclose = () => setTimeout(initWs, 2000);
 }
@@ -994,6 +995,52 @@ function renderScanner() {
     const el = document.getElementById('scan-subnet');
     if (el && data.subnets?.[0]) el.value = data.subnets[0];
   }).catch(() => {});
+}
+
+// ─── quarantined TVs ─────────────────────────────────────────────────────────
+
+async function loadQuarantined() {
+  try {
+    const data = await fetch('/api/quarantined').then(r => r.json());
+    renderQuarantinedCard(data);
+  } catch { /* best-effort */ }
+}
+
+function renderQuarantinedCard(data) {
+  const el = document.getElementById('card-quarantined');
+  if (!el) return;
+  const list = data.quarantined ?? [];
+  if (list.length === 0) { el.innerHTML = ''; el.style.display = 'none'; return; }
+  el.style.display = '';
+  const rows = list.map(q => `
+    <tr>
+      <td>${esc(q.ip)}</td>
+      <td style="font-size:10px">${esc(q.mac)}</td>
+      <td>${esc(q.model ?? '—')}</td>
+      <td>${esc(q.serial ?? '—')}</td>
+      <td><span class="badge badge-red">${esc(q.firmware ?? 'unknown')}</span></td>
+      <td>
+        <a href="http://${esc(q.ip)}/updatefirmware.html" target="_blank"
+           style="font-family:var(--mono);font-size:10px;color:var(--warn);text-decoration:none;margin-right:10px">Update firmware ↗</a>
+        <a href="http://${esc(q.ip)}/" target="_blank"
+           style="font-family:var(--mono);font-size:10px;color:var(--accent2);text-decoration:none">Open device UI ↗</a>
+      </td>
+    </tr>`).join('');
+  el.innerHTML = `
+  <div class="card-header">
+    <h2 style="color:var(--danger)">Quarantined TVs</h2>
+    <span class="badge badge-red">${list.length}</span>
+    <span style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-left:8px">expected: ${esc(data.expectedFirmware)}</span>
+  </div>
+  <div class="card-body" style="padding:0">
+    <table>
+      <thead><tr><th>IP</th><th>MAC</th><th>Model</th><th>Serial</th><th>Firmware</th><th>Actions</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p style="font-family:var(--mono);font-size:10px;color:var(--muted);padding:8px 16px;margin:0">
+      These TVs have an unexpected firmware version and will not be used by the router until updated.
+    </p>
+  </div>`;
 }
 
 async function startScan() {
@@ -2311,7 +2358,14 @@ document.addEventListener('DOMContentLoaded', () => {
   cacheDiv.className = 'card';
   cacheDiv.id = 'card-cache';
   document.getElementById('scanner-wrap').appendChild(cacheDiv);
+  // Quarantined TVs card (hidden when empty)
+  const quarDiv = document.createElement('div');
+  quarDiv.className = 'card';
+  quarDiv.id = 'card-quarantined';
+  quarDiv.style.display = 'none';
+  document.getElementById('scanner-wrap').appendChild(quarDiv);
   loadAssetManager();
+  loadQuarantined();
 });
 
 document.addEventListener('keydown', e => {

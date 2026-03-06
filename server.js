@@ -942,6 +942,15 @@ async function handleApi(method, pathname, body, req) {
     return { subnets: [...new Set(subnets)] };
   }
 
+  // GET /api/quarantined  — list TVs quarantined due to firmware mismatch
+  if (method === 'GET' && pathname === '/api/quarantined') {
+    const reg = loadRegistry();
+    const list = Object.entries(reg.quarantined ?? {}).map(([mac, q]) => ({
+      mac, ...q, expectedFirmware: EXPECTED_FIRMWARE,
+    }));
+    return { quarantined: list, expectedFirmware: EXPECTED_FIRMWARE };
+  }
+
   // POST /api/scan  { subnet: '192.168.1', port?: 7142, timeout?: 400 }
   // TCP-probes .1–.254; for responsive hosts attempts a quick power-status read.
   if (method === 'POST' && pathname === '/api/scan') {
@@ -972,6 +981,19 @@ async function handleApi(method, pathname, body, req) {
     }
 
     const reg = loadRegistry();
+
+    // ── 0. Previously quarantined TV — just update IP + re-broadcast quarantine ──
+    if (reg.quarantined?.[mac]) {
+      const q = reg.quarantined[mac];
+      if (q.ip !== ip) {
+        q.ip = ip;
+        saveRegistry(reg);
+      }
+      log('info', `[device-online] Quarantined TV ${mac} (${ip}) — firmware ${q.firmware ?? 'unknown'}`);
+      wsBroadcast({ type: 'device-quarantined', mac, ip, firmware: q.firmware ?? null,
+                    model: q.model ?? null, serial: q.serial ?? null });
+      return { ok: true, category: 'quarantined', mac, ip };
+    }
 
     // ── 1. Known media player — silently acknowledge, update IP if changed ──
     if (reg.players?.[mac]) {
@@ -1052,28 +1074,56 @@ async function handleApi(method, pathname, body, req) {
     // 3a. Try NEC port 7142
     const tvProbe = await probeTvNec(ip, 5000);
     if (tvProbe.ok) {
+      const reg2 = loadRegistry();           // reload to avoid clobbering concurrent writes
+      if (!reg2.players)     reg2.players     = {};
+      if (!reg2.devices)     reg2.devices     = {};
+      if (!reg2.quarantined) reg2.quarantined = {};
+
+      // Quarantine if firmware doesn't match expected version
+      if (tvProbe.firmware && tvProbe.firmware !== EXPECTED_FIRMWARE) {
+        const qName = tvProbe.model
+          ? `TV – ${tvProbe.model} (${ip}) [firmware ${tvProbe.firmware}]`
+          : `TV (${ip}) [firmware ${tvProbe.firmware}]`;
+        reg2.quarantined[mac] = {
+          ip,
+          discoveredAt: new Date().toISOString(),
+          firmware: tvProbe.firmware,
+          ...(tvProbe.model  ? { model:  tvProbe.model  } : {}),
+          ...(tvProbe.serial ? { serial: tvProbe.serial } : {}),
+        };
+        saveRegistry(reg2);
+        log('warn', `[device-online] Quarantined TV: firmware "${tvProbe.firmware}" ≠ expected "${EXPECTED_FIRMWARE}" — MAC=${mac} IP=${ip}`);
+        wsBroadcast({
+          type: 'device-quarantined',
+          mac, ip,
+          firmware: tvProbe.firmware,
+          model:  tvProbe.model  ?? null,
+          serial: tvProbe.serial ?? null,
+        });
+        return { ok: true, category: 'quarantined', discovered: true, mac, ip, firmware: tvProbe.firmware };
+      }
+
       const name = tvProbe.model
         ? `TV – ${tvProbe.model} (${ip})`
         : `TV (${ip})`;
-      const reg2 = loadRegistry();           // reload to avoid clobbering concurrent writes
-      if (!reg2.players)  reg2.players  = {};
-      if (!reg2.devices)  reg2.devices  = {};
       reg2.devices[mac] = {
         name,
         tvIp: ip,
         groups: [],
         discoveredAt: new Date().toISOString(),
-        ...(tvProbe.model  ? { model:  tvProbe.model  } : {}),
-        ...(tvProbe.serial ? { serial: tvProbe.serial } : {}),
+        ...(tvProbe.model    ? { model:    tvProbe.model    } : {}),
+        ...(tvProbe.serial   ? { serial:   tvProbe.serial   } : {}),
+        ...(tvProbe.firmware ? { firmware: tvProbe.firmware } : {}),
       };
       saveRegistry(reg2);
       log('info', `[device-online] New TV discovered: "${name}" MAC=${mac}`);
       wsBroadcast({
         type: 'device-discovered', category: 'tv',
         mac, name, ip,
-        power:  tvProbe.power,
-        model:  tvProbe.model  ?? null,
-        serial: tvProbe.serial ?? null,
+        power:    tvProbe.power,
+        model:    tvProbe.model    ?? null,
+        serial:   tvProbe.serial   ?? null,
+        firmware: tvProbe.firmware ?? null,
       });
       return { ok: true, category: 'tv', discovered: true, mac, name, ip, power: tvProbe.power };
     }
@@ -1770,7 +1820,7 @@ async function probeTvNec(ip, timeoutMs = 5000) {
       new Promise((_, rej) => setTimeout(() => rej(new Error('nec-timeout')), 2500)),
     ]);
 
-    const result = { ok: true, power: 'unknown', model: null, serial: null };
+    const result = { ok: true, power: 'unknown', model: null, serial: null, firmware: null };
 
     try { const pw = await query(() => sess.powerStatus(1));
           result.power = pw.modeStr ?? 'unknown'; } catch { /* best-effort */ }
@@ -1778,6 +1828,8 @@ async function probeTvNec(ip, timeoutMs = 5000) {
           result.model = m.model ?? m.raw ?? null; } catch { /* best-effort */ }
     try { const s  = await query(() => sess.serialRead(1));
           result.serial = s.serial ?? s.raw ?? null; } catch { /* best-effort */ }
+    try { const f  = await query(() => sess.firmwareVersionRead(1));
+          result.firmware = f.version ?? null; } catch { /* best-effort */ }
 
     return result;
   } catch {
@@ -2381,6 +2433,7 @@ async function pushGroupToPlayer(tvIP, folderName, files) {
 
 const MEDIA_PLAYER_INPUT  = 0x87;
 const SAFE_INPUT          = 0x11; // HDMI1 — nominated safe swap input used when bouncing away from MP
+const EXPECTED_FIRMWARE   = '00R3.400'; // Only this firmware version is supported; others are quarantined
 const PLAYER_ROOT         = '/mnt/usb1';
 const INTERVAL_INFINITE   = 99999; // firmware accepts up to 99999s (~27hrs)
 const INTERVAL_DEFAULT    = 30;
