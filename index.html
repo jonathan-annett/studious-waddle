@@ -891,18 +891,17 @@ async function doEmergencyStop() {
 
 // ─── media player folder control ─────────────────────────────────────────────
 
-const PLAYER_FOLDERS = ['folder1','folder2','folder3','folder4','all'];
+let playerFolders = [];   // populated dynamically via /api/player/folders
 
 function renderPlayer() {
   const tvIP = document.getElementById('inp-host')?.value?.trim() || '';
-  const folderBtns = PLAYER_FOLDERS.map(f => `
-    <button class="btn-secondary" onclick="doPlayFolder('${f}')"
-      id="player-btn-${f}" style="min-width:80px">▶ ${f}</button>
-  `).join('');
 
   document.getElementById('card-player').innerHTML = `
   <div class="card-header"><h2>▶ Media Player</h2>
-    <button class="btn-secondary" onclick="refreshPlayerFolder()">↻ Current</button>
+    <div style="display:flex;gap:6px">
+      <button class="btn-secondary" onclick="refreshPlayerFolder()">↻ Current</button>
+      <button class="btn-secondary" onclick="loadPlayerFolders()">↻ Folders</button>
+    </div>
   </div>
   <div class="card-body">
     <p style="font-size:11px;color:var(--muted);margin:0 0 12px">
@@ -933,12 +932,17 @@ function renderPlayer() {
     <div style="margin-bottom:10px;font-family:var(--mono);font-size:11px;color:var(--muted)">
       Active folder: <span id="player-current-folder">unknown — click ↻</span>
     </div>
-    <div class="flex-gap" style="flex-wrap:wrap">
-      ${folderBtns}
+    <div id="player-folder-btns" class="flex-gap" style="flex-wrap:wrap;margin-bottom:10px">
+      <span style="color:var(--muted);font-size:11px">Loading folders…</span>
+    </div>
+    <div class="flex-gap">
       <button class="btn-warn" onclick="doPlayerStop()" id="player-btn-stop">■ Stop / Restore</button>
     </div>
     <div style="margin-top:10px" id="player-result"></div>
   </div>`;
+
+  // Auto-load folder list if a TV IP is already known
+  if (tvIP) loadPlayerFolders(tvIP);
 }
 
 async function refreshPlayerFolder() {
@@ -952,19 +956,50 @@ async function refreshPlayerFolder() {
   } catch(e) { el.textContent = 'error: ' + e.message; }
 }
 
-async function doPlayFolder(folder) {
+/** Rebuild the folder button strip from the current playerFolders array. */
+function renderPlayerFolderButtons() {
+  const el = document.getElementById('player-folder-btns');
+  if (!el) return;
+  if (playerFolders.length === 0) {
+    el.innerHTML = '<span style="color:var(--muted);font-size:11px">No folders found — enter TV IP and click ↻ Folders</span>';
+    return;
+  }
+  el.innerHTML = playerFolders.map((f, i) => `
+    <button class="btn-secondary" onclick="doPlayFolder(${i})"
+      id="player-btn-${i}" style="min-width:80px" title="${esc(f)}">▶ ${esc(f)}</button>
+  `).join('');
+}
+
+/** Fetch folder list from the player and refresh the button strip. */
+async function loadPlayerFolders(tvIP) {
+  tvIP = tvIP || document.getElementById('player-tv-ip')?.value?.trim();
+  if (!tvIP) { alert('Enter a TV IP first'); return; }
+  const el = document.getElementById('player-folder-btns');
+  if (el) el.innerHTML = '<span style="color:var(--muted);font-size:11px">Loading folders…</span>';
+  try {
+    const r = await api('/player/folders', { tvIP });
+    playerFolders = r.folders || [];
+    renderPlayerFolderButtons();
+  } catch(e) {
+    if (el) el.innerHTML = `<span class="error-text">✗ ${esc(e.message)}</span>`;
+  }
+}
+
+async function doPlayFolder(idx) {
+  const folder       = playerFolders[idx];
+  if (folder === undefined) return;
   const tvIP         = document.getElementById('player-tv-ip')?.value?.trim();
   const restoreInput = parseInt(document.getElementById('player-restore-input')?.value ?? '17', 10);
   const interval     = parseInt(document.getElementById('player-interval')?.value ?? '30', 10);
   const resultEl     = document.getElementById('player-result');
   if (!tvIP) { alert('Enter a TV IP first'); return; }
 
-  // Mark button as pending
-  PLAYER_FOLDERS.forEach(f => {
-    const b = document.getElementById(`player-btn-${f}`);
+  // Reset all folder buttons, mark this one pending
+  playerFolders.forEach((_, i) => {
+    const b = document.getElementById(`player-btn-${i}`);
     if (b) b.className = 'btn-secondary';
   });
-  const activeBtn = document.getElementById(`player-btn-${folder}`);
+  const activeBtn = document.getElementById(`player-btn-${idx}`);
   if (activeBtn) activeBtn.className = 'btn-warn';
 
   resultEl.innerHTML = `<span style="color:var(--muted)">Checking folder contents…</span>`;
@@ -991,8 +1026,8 @@ async function doPlayerStop() {
   const resultEl     = document.getElementById('player-result');
   if (!tvIP) { alert('Enter a TV IP first'); return; }
 
-  PLAYER_FOLDERS.forEach(f => {
-    const b = document.getElementById(`player-btn-${f}`);
+  playerFolders.forEach((_, i) => {
+    const b = document.getElementById(`player-btn-${i}`);
     if (b) b.className = 'btn-secondary';
   });
 

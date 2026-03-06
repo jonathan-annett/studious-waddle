@@ -464,6 +464,23 @@ async function handleApi(method, pathname, body, req) {
     return { ok: true, playerIP, folder, raw };
   }
 
+  // POST /api/player/folders  { tvIP }
+  // Returns the list of top-level folder names on the media player SD card.
+  if (method === 'POST' && pathname === '/api/player/folders') {
+    const { tvIP } = body;
+    if (!tvIP) return { error: 'tvIP required' };
+    const playerIP = await getPlayerIP(tvIP);
+    // Navigate to root
+    await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
+    const raw   = await playerRequest(playerIP, `/mmb/filelist.json?_=${Date.now()}`, 'GET',
+      null, { referer: `http://${playerIP}/sd_card_viewer.html` });
+    const fixed = raw.replace(/,(\s*\])/g, '$1');
+    const list  = JSON.parse(fixed);
+    const folders = (list.fileinfo || [])
+      .filter(f => f.name !== '..' && f.type === 0)
+      .map(f => f.name);
+    return { ok: true, playerIP, folders };
+  }
 
   // GET /api/cache  — list all cached assets (reads sidecars)
   if (method === 'GET' && pathname === '/api/cache') {
