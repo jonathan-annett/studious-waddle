@@ -1,0 +1,278 @@
+# CLAUDE.md — NEC Monitor Control System
+
+This document brings you up to speed on the project. Read it fully before making any changes.
+
+---
+
+## What This Is
+
+A Node.js server (`server.js`) + single-page web UI (`index.html`) that controls NEC large-format
+displays over a local network. It runs on an OpenWrt router sitting on the same LAN as the
+displays. Zero npm dependencies — everything uses Node.js built-ins only.
+
+**Repo:** https://github.com/jonathan-annett/studious-waddle  
+**Deployed at:** `/server/claude12/` on the OpenWrt router  
+**Port:** 4000 (run with `node server.js`)
+
+---
+
+## Hardware Architecture — Critical
+
+Each NEC display is actually **two separate network devices**:
+
+| Device | IP (example) | Protocol | Purpose |
+|--------|-------------|----------|---------|
+| **TV** | `192.168.100.198` | NEC 7142 (RS-232C over TCP) | Input switching, power, brightness, all monitor controls |
+| **Media Player** | `192.168.100.199` | HTTP CGI (`/cgi-bin/cgictrl`) | File management, folder config, slideshow settings |
+
+The TV does not know about the media player's folder contents. The media player cannot switch
+inputs. They are almost certainly separate processors sharing a box — NEC reuses TV firmware
+across models and bolts the media player on as a separate firmware layer.
+
+The server discovers the media player IP automatically by calling the TV's `pjctrl` endpoint
+(`getPlayerIP()` in server.js).
+
+**All input switching must go through the TV (port 7142).  
+All file/folder/playback config must go through the Media Player HTTP API.**
+
+---
+
+## NEC 7142 Protocol (TV side)
+
+Custom binary protocol over TCP port 7142. Implemented in `nec-protocol.js`.
+
+Key facts:
+- Sessions are stateful — `POST /api/connect { host }` opens a TCP connection, returns a `sessionId`
+- Sessions are **in-memory only** — lost on server restart, must reconnect
+- Monitor IDs are 1-based (default `1`)
+- VCP commands: `vcpGet(monitorId, opPage, opCode)` / `vcpSet(monitorId, opPage, opCode, value)`
+- Input source is VCP page `0x00`, opcode `0x60`
+- MP (Media Player) input value: `0x87` (decimal 135)
+- HDMI1 = `0x11` (17), HDMI2 = `0x12` (18), DP1 = `0x0F` (15), DP2 = `0x10` (16)
+
+**Emergency contents** use the `CA1F` command family (not VCP):
+- `emergencyDisplay(monitorId)` — activates EMERGENCY CONTENTS folder, locks all controls
+- `emergencyDelete(monitorId)` — formal stop command
+
+---
+
+## Media Player HTTP API (Player side)
+
+All requests go to `http://<playerIP>/cgi-bin/cgictrl?<command>` via POST.
+**Must use `insecureHTTPParser: true`** — the firmware sends malformed HTTP headers.
+`playerRequest()` in server.js handles this correctly.
+
+### CGI Commands Reference
+
+**File management:**
+```
+FL=-01          Navigate to root
+FL=-02          Navigate to parent
+FL=000          Navigate into item at index 0 (zero-padded 3 digits)
+FM=             Enter file manager mode
+FC=<name>       Create folder (URL-encoded name)
+FD=<name>       Delete file/folder (URL-encoded name)
+Fu=<clock>      Upload file — multipart/form-data POST, clock=Date.now()
+RSG=<clock>     Finalise/commit upload
+RSB=<clock>     Restart media player process
+```
+
+**Settings (V= namespace):**
+```
+V=S,2A,<len>,0,<val>,%00,   Set AutoPlay mode: 0=off, 1=slideshow, 2=mediapack
+V=G,2A,1,0,%00,             Get AutoPlay mode
+V=S,2B,<len>,1,<path>,%00,  Set AutoPlay folder path (DO NOT url-encode slashes)
+V=G,2B,1,0,%00,             Get AutoPlay folder path
+V=S,22,<len>,0,<secs>,%00,  Set slideshow interval (5–99999 seconds)
+```
+
+**CRITICAL — V= length field:**
+`<len>` = raw string length + 1 (null terminator). Never use `encodeURIComponent` on the path
+value — slashes are safe after the comma delimiter. This was a hard-won bug fix.
+
+**Filelist API:**
+```
+GET /mmb/filelist.json
+```
+Returns `{ dir_path, file_cnt, fileinfo: [{name, size, date, type}] }`  
+`type`: 0 = folder, 1 = file  
+**Firmware bug:** trailing comma before `]` — fix with `.replace(/,(\s*\])/g, '$1')` before JSON.parse.
+
+**Index navigation:**
+Items are 0-based in the filelist array. Use `findIndex()` to locate a folder by name, then
+`FL=<index padded to 3 digits>` to navigate into it.
+
+---
+
+## Playback Flow ("play folder X")
+
+The correct sequence to switch the display to a named folder:
+
+1. **Check folder contents** — read filelist, abort if empty
+2. **Decide interval** — 99999s (infinite) if 1 file, user-configured (default 30s) if multiple
+3. **Read current TV input** — if already on MP (`0x87`), bounce to restore input first (800ms delay)  
+   This is mandatory — the player won't pick up a new folder without an input bounce
+4. **Set AutoPlay folder** — `V=S,2B,...`
+5. **Set interval** — `V=S,22,...`
+6. **Restart player** — `RSG=<clock>`
+7. **Switch TV input to MP** — `vcpSet(monitorId, 0x00, 0x60, 0x87)`
+
+This is all implemented in `playFolder()` in server.js.
+
+---
+
+## Emergency Contents System
+
+A separate, higher-priority playback mode that locks all monitor controls (except power).
+
+**Flow:**
+1. Save current input via VCP get
+2. `POST /api/emergency-upload?tvIP=x.x.x.x` — wipes SD card, creates `EMERGENCY CONTENTS`
+   folder, uploads files in order (slideshow plays in upload order)
+3. `POST /api/emergency/display` — activates emergency mode
+4. `POST /api/emergency/stop` — restores saved input (which exits emergency mode); falls back
+   to `emergencyDelete` if saved input was MP or unavailable
+
+The emergency system works even if the display is in normal media player mode.
+
+---
+
+## API Routes
+
+All routes accept/return JSON. `sessionId` is required for TV-side operations.
+
+### Connection
+```
+POST /api/connect          { host, port? }          → { sessionId, monitorId, ... }
+DELETE /api/connect/:id                              → disconnect
+POST /api/interrogate      { sessionId }             → full display state snapshot
+```
+
+### VCP (TV controls)
+```
+POST /api/vcp/get          { sessionId, opPage, opCode }
+POST /api/vcp/set          { sessionId, opPage, opCode, value, persist? }
+POST /api/power/status     { sessionId }
+POST /api/power/set        { sessionId, state: 'on'|'off' }
+```
+
+### Media Player (folder playback)
+```
+POST /api/player/play      { sessionId, tvIP, folder, restoreInput?, interval? }
+POST /api/player/stop      { sessionId, tvIP, restoreInput? }
+POST /api/player/folder    { tvIP }                  → current autoplay folder
+POST /api/player/filelist  { tvIP, folder }          → file count + names in folder
+```
+
+### Emergency
+```
+POST /api/emergency/display   { sessionId }
+POST /api/emergency/stop      { sessionId }
+POST /api/emergency-upload?tvIP=x.x.x.x   (multipart/form-data files)
+```
+
+### Asset Cache
+```
+GET  /api/cache
+POST /api/cache/store      (multipart/form-data)
+POST /api/cache/send       { hash, tvIP }
+DELETE /api/cache/:hash
+```
+
+### Utilities
+```
+GET  /api/subnets
+POST /api/scan             { subnet }
+POST /api/self-diagnosis   { sessionId }
+POST /api/serial           { sessionId }
+POST /api/model            { sessionId }
+POST /api/firmware         { sessionId }
+POST /api/mac              { sessionId }
+```
+
+---
+
+## SD Card Folder Structure
+
+The media player mounts its SD card at `/mnt/usb1/`. Current test folder structure:
+
+```
+/mnt/usb1/
+  folder1/    ← sample1.png (red slide)
+  folder2/    ← sample2.png (blue slide)
+  folder3/    ← sample3.png (green slide)
+  folder4/    ← sample4.png (orange slide)
+  all/        ← all 4 slides
+  EMERGENCY CONTENTS/   ← created by emergency upload flow
+```
+
+The folder names `folder1`–`folder4` and `all` are hardcoded in `PLAYER_FOLDERS` in index.html.
+This will need to be made dynamic in a future iteration.
+
+---
+
+## Known Firmware Quirks
+
+1. **Malformed HTTP headers** — always use `insecureHTTPParser: true` in all http.request calls
+   to the media player. `playerRequest()` does this already.
+
+2. **Invalid JSON from filelist** — trailing comma before `]`. Fix:
+   ```js
+   raw.replace(/,(\s*\])/g, '$1')
+   ```
+
+3. **V= length field** — must be raw string byte length + 1, not encoded length.
+   Do NOT url-encode path values in V= commands.
+
+4. **Input bounce required** — if TV is already on MP input and you change the autoplay folder,
+   the player won't reload. Must switch away (800ms) then back to MP.
+
+5. **Slideshow interval range** — firmware accepts 5–99999 seconds. Values outside this range
+   are clamped by `setSlideInterval()`. Use 99999 as "infinite" for single-slide folders.
+
+6. **RSG= vs RSB=** — `RSG=<clock>` finalises uploads AND restarts playback. `RSB=<clock>` just
+   restarts. Use RSG= for the play flow.
+
+---
+
+## File Structure
+
+```
+server.js          Main server — all API routes + player/TV subsystems
+index.html         Single-page UI — connects, interrogates, controls display
+nec-protocol.js    NEC 7142 protocol driver (TCP, binary framing, VCP, emergency)
+nec-protocol.test.js  Protocol unit tests
+CLAUDE.md          This file
+```
+
+---
+
+## Development Notes
+
+- **No npm deps** — do not introduce any. Node built-ins only (`http`, `net`, `fs`, `crypto`,
+  `url`, `path`).
+- The server is structured as one large `handleApi()` function with if/else route matching.
+  Keep this pattern — don't refactor to Express or a router framework.
+- The UI uses vanilla JS with no framework. Cards are rendered by dedicated `renderX()` functions
+  called from `populateUI()` after interrogation. Keep this pattern.
+- `PLAYER_FOLDERS` in index.html is the list shown as folder buttons in the Media Player card.
+  This is temporary test scaffolding — a future task is to read folder names dynamically from
+  the player via `/api/player/filelist`.
+- The server logs to stdout with timestamps. The UI receives logs via WebSocket and displays
+  them in the log panel.
+
+---
+
+## Typical Test Session
+
+```bash
+# On router
+cd /server/claude12
+node server.js
+
+# In browser — http://<router-ip>:4000
+# 1. Enter TV IP (192.168.100.198), click Connect
+# 2. Click Interrogate All to populate all cards
+# 3. Use Media Player card to switch folders
+# 4. Use Emergency Contents card for emergency mode testing
+```
