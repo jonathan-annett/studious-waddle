@@ -993,6 +993,15 @@ async function handleApi(method, pathname, body, req) {
     return { ok: true, ...result };
   }
 
+  // POST /api/restart
+  // Exits the process cleanly so the `./run --dev` loop can git pull and restart.
+  // This is the deploy trigger: push to GitHub, then hit this endpoint from the dev machine.
+  if (method === 'POST' && pathname === '/api/restart') {
+    log('info', '[restart] Exiting for git-pull restart — goodbye');
+    setTimeout(() => process.exit(0), 300); // let response flush first
+    return { ok: true, message: 'Server exiting — loop will git pull and restart' };
+  }
+
   // POST /api/emergency-upload?tvIP=x.x.x.x&filename=foo.mp4
   return { error: `Unknown endpoint: ${method} ${pathname}` };
 }

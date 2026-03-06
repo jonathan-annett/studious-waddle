@@ -1,4 +1,19 @@
 #!/bin/bash
 
-NEC_CACHE_DIR=/server/cache NEC_SUBNET=192.168.100 node server.js 4000
+NEC_CACHE_DIR=/server/cache
+NEC_SUBNET=192.168.100
 
+if [ "$1" = "--dev" ]; then
+  echo "[run] Dev mode — git pull → node → repeat on exit"
+  while true; do
+    echo "[run] Pulling latest from origin..."
+    git pull
+    echo "[run] Starting server..."
+    NEC_CACHE_DIR=$NEC_CACHE_DIR NEC_SUBNET=$NEC_SUBNET node server.js 4000
+    EXIT=$?
+    echo "[run] Server exited (code $EXIT). Restarting in 2s..."
+    sleep 2
+  done
+else
+  NEC_CACHE_DIR=$NEC_CACHE_DIR NEC_SUBNET=$NEC_SUBNET node server.js 4000
+fi
