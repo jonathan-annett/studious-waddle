@@ -114,20 +114,37 @@ The correct sequence to switch the display to a named folder:
 
 1. **Check folder contents** — read filelist, abort if empty
 2. **Decide interval** — 99999s (infinite) if 1 file, user-configured (default 30s) if multiple
-3. **Read current TV input** — if already on MP (`0x87`), bounce to restore input first (800ms delay)
-   This is mandatory — the player won't pick up a new folder without an input bounce
-4. **Set AutoPlay folder** — `V=S,2B,...`
+3. **Read current TV input** — if already on MP (`0x87`), bounce to `SAFE_INPUT` (HDMI1, `0x11`)
+   and wait 800ms. This is mandatory — the player won't pick up a new folder without a bounce.
+   Using a fixed safe input keeps behaviour predictable regardless of what was on-screen before.
+4. **Set AutoPlay folder + mode** — `V=S,2B,...` (path) and `V=S,2A,...` (mode=1, slideshow)
 5. **Set interval** — `V=S,22,...`
-6. **Restart player** — `RSG=<clock>`
+6. **Restart player** — `RSG=<clock>` commits V=S,2B/2A and starts the slideshow immediately
 7. **Switch TV input to MP** — `vcpSet(monitorId, 0x00, 0x60, 0x87)`
-8. **Clear autoplay startup config** — 3 seconds later (fire-and-forget): `V=S,2A,2,0,0,%00,`
+8. **Clear autoplay flag** — 3 seconds later (fire-and-forget): `V=S,2A,2,0,0,%00,`
 
-Step 8 is intentional: `RSG=` has already committed the folder path and started playback.
-Clearing `V=S,2A` afterwards only affects the player's *next* reboot — the running slideshow is
-unaffected. This prevents the firmware from auto-restarting the last folder if staff manually
-change content via the NEC web UI, while still allowing the server to re-trigger via `playFolder()`.
+**Why step 8 exists (important):** The NEC firmware autoplays the configured folder whenever
+the TV switches to the MP input while V=S,2A is set to mode=1. Humans can switch inputs with
+the IR remote or the NEC web UI — if the flag stayed set, any time they switched away from MP
+and back, the slideshow would restart from the beginning. By clearing it ~3 seconds after *we*
+switch to MP (after the slideshow is already running), we win the race: the player is running
+freely via RSG=, and a human switching away/back to MP afterwards won't retrigger autoplay.
+This also prevents the player from auto-restarting the folder after an unexpected reboot.
+The server can always re-trigger via `playFolder()` which sets V=S,2A=1 again as part of
+the play sequence.
 
 This is all implemented in `playFolder()` in server.js.
+
+## Idle / Stop Flow ("no active event, no default group")
+
+When the scheduler determines a device should not be playing anything (no active sub-event
+and `device.defaultGroup` is not set), it:
+
+1. **Clears the autoplay flag** — `V=S,2A,2,0,0,%00,` on the media player
+2. **Reads current TV input** — if already on MP (`0x87`), switches to `SAFE_INPUT` (HDMI1)
+
+This returns the display to a neutral state. The player stops being the visible source, and
+the autoplay flag is cleared so reconnecting to MP manually won't retrigger it.
 
 ---
 
@@ -336,7 +353,7 @@ This will need to be made dynamic in a future iteration.
    the NEC player's own web UI via DevTools network capture.
 
 4. **Input bounce required** — if TV is already on MP input and you change the autoplay folder,
-   the player won't reload. Must switch away (800ms) then back to MP.
+   the player won't reload. Must switch to `SAFE_INPUT` (800ms) then back to MP.
 
 5. **Slideshow interval range** — firmware accepts 5–99999 seconds. Values outside this range
    are clamped by `setSlideInterval()`. Use 99999 as "infinite" for single-slide folders.

@@ -232,11 +232,26 @@ async function checkSchedule() {
         log('warn', `[scheduler] play failed for ${mac}: ${e.message}`);
       });
     } else if (!desired && device.tvIp) {
-      log('info', `[scheduler] turning off autoplay for ${mac}`);
-      // Best-effort: disable autoplay mode on player
-      getPlayerIP(device.tvIp).then(playerIP =>
-        playerRequest(playerIP, `/cgi-bin/cgictrl?V=S,2A,2,0,0,%00,`, 'POST')
-      ).catch(e => {
+      log('info', `[scheduler] no active event or default group for ${mac} — stopping autoplay`);
+      // Best-effort: clear autoplay flag, then switch TV away from MP if it's on it.
+      // Same intent as /api/player/stop but without a pre-existing session.
+      (async () => {
+        const playerIP = await getPlayerIP(device.tvIp);
+        await playerRequest(playerIP, `/cgi-bin/cgictrl?V=S,2A,2,0,0,%00,`, 'POST');
+        log('info', `[scheduler] autoplay flag cleared on player ${playerIP}`);
+
+        let tempSession = null;
+        try {
+          tempSession = await openTcpSession(device.tvIp, { port: 7142 });
+          const inp = await tempSession.vcpGet(1, 0x00, 0x60);
+          if (inp.current === MEDIA_PLAYER_INPUT) {
+            await tempSession.vcpSet(1, 0x00, 0x60, SAFE_INPUT);
+            log('info', `[scheduler] TV input switched from MP to safe input 0x${SAFE_INPUT.toString(16)} for ${mac}`);
+          }
+        } finally {
+          if (tempSession) await tempSession.close().catch(() => {});
+        }
+      })().catch(e => {
         log('warn', `[scheduler] stop failed for ${mac}: ${e.message}`);
       });
     }
@@ -616,7 +631,7 @@ async function handleApi(method, pathname, body, req) {
     const s   = sessions.get(sessionId);
     const mid = monitorId ?? s?.monitorId;
     try {
-      const result = await playFolder(tvIP, folder, s?.session ?? null, mid, restoreInput ?? 0x11, interval ?? INTERVAL_DEFAULT);
+      const result = await playFolder(tvIP, folder, s?.session ?? null, mid, restoreInput ?? SAFE_INPUT, interval ?? INTERVAL_DEFAULT);
       return { ...result, saved: !!found, applied: true };
     } catch(e) {
       log('warn', `[player/play] apply failed (device offline?): ${e.message}`);
@@ -2250,6 +2265,7 @@ async function pushGroupToPlayer(tvIP, folderName, files) {
 // ─── Media player folder playback ─────────────────────────────────────────────
 
 const MEDIA_PLAYER_INPUT  = 0x87;
+const SAFE_INPUT          = 0x11; // HDMI1 — nominated safe swap input used when bouncing away from MP
 const PLAYER_ROOT         = '/mnt/usb1';
 const INTERVAL_INFINITE   = 99999; // firmware accepts up to 99999s (~27hrs)
 const INTERVAL_DEFAULT    = 30;
@@ -2341,7 +2357,7 @@ async function getPlayerFolderContents(playerIP, folder) {
  *  6. Restart player (RSG=)
  *  7. Switch TV input to MP
  */
-async function playFolder(tvIP, folder, session, monitorId, restoreInput = 0x11, interval = INTERVAL_DEFAULT) {
+async function playFolder(tvIP, folder, session, monitorId, safeInput = SAFE_INPUT, interval = INTERVAL_DEFAULT) {
   const folderPath = `${PLAYER_ROOT}/${folder}`;
   log('info', `[player/play] folder=${folderPath} tv=${tvIP}`);
 
@@ -2387,10 +2403,10 @@ async function playFolder(tvIP, folder, session, monitorId, restoreInput = 0x11,
       }
     }
 
-    // If already on MP, bounce away first so the player picks up the new folder
+    // If already on MP, bounce to safe input first so the player picks up the new folder
     if (currentInput === MEDIA_PLAYER_INPUT && activeSess) {
-      log('info', `[player/play] already on MP — bouncing to 0x${restoreInput.toString(16)} first`);
-      await activeSess.vcpSet(activeMid, 0x00, 0x60, restoreInput);
+      log('info', `[player/play] already on MP — bouncing to safe input 0x${safeInput.toString(16)}`);
+      await activeSess.vcpSet(activeMid, 0x00, 0x60, safeInput);
       await new Promise(r => setTimeout(r, 800));
     }
 
