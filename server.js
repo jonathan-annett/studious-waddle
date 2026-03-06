@@ -73,6 +73,143 @@ function normalizeMac(mac) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Event scheduling helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Find the currently active sub-event for a device MAC.
+ * Returns { eventId, event, subEvent } or null.
+ */
+function getActiveSubEvent(mac, reg) {
+  const now = new Date();
+  for (const [eventId, event] of Object.entries(reg.events || {})) {
+    for (const sub of event.subEvents || []) {
+      if (!sub.devices || !sub.devices.includes(mac)) continue;
+      if (now >= new Date(sub.start) && now < new Date(sub.end)) {
+        return { eventId, event, subEvent: sub };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Find scheduling conflicts for a proposed sub-event.
+ * Returns array of { mac, eventId, eventName, subEventName, start, end }.
+ */
+function findConflicts(devices, start, end, excludeEventId, excludeSubId, reg) {
+  const conflicts = [];
+  const pStart = new Date(start);
+  const pEnd   = new Date(end);
+  for (const [eid, event] of Object.entries(reg.events || {})) {
+    for (const sub of event.subEvents || []) {
+      if (eid === excludeEventId && sub.id === excludeSubId) continue;
+      const sStart = new Date(sub.start);
+      const sEnd   = new Date(sub.end);
+      // Overlap: A starts before B ends AND B starts before A ends
+      if (pStart < sEnd && sStart < pEnd) {
+        for (const mac of devices) {
+          if (sub.devices && sub.devices.includes(mac)) {
+            conflicts.push({
+              mac, eventId: eid, eventName: event.name,
+              subEventName: sub.name, start: sub.start, end: sub.end,
+            });
+          }
+        }
+      }
+    }
+  }
+  return conflicts;
+}
+
+/**
+ * Validate all sub-events in a proposed event. Returns array of conflict objects.
+ */
+function validateEvent(event, excludeEventId, reg) {
+  const allConflicts = [];
+  for (const sub of event.subEvents || []) {
+    if (!sub.start || !sub.end || !sub.devices?.length || !sub.groupId) continue;
+    if (new Date(sub.end) <= new Date(sub.start)) continue;
+    const c = findConflicts(sub.devices, sub.start, sub.end, excludeEventId, sub.id, reg);
+    allConflicts.push(...c);
+  }
+  return allConflicts;
+}
+
+/**
+ * Determine desired autoplay folder for a device: active event group, or defaultGroup.
+ * Returns folder name string or null.
+ */
+function getDesiredAutoplay(mac, reg) {
+  const active = getActiveSubEvent(mac, reg);
+  if (active) {
+    const group = reg.groups?.[active.subEvent.groupId];
+    return group ? group.name : null;
+  }
+  const device = reg.devices?.[mac];
+  if (device?.defaultGroup) {
+    const group = reg.groups?.[device.defaultGroup];
+    return group ? group.name : null;
+  }
+  return null;
+}
+
+/**
+ * Scheduler: check all event-involved devices and apply correct autoplay state.
+ * Called every 60s and after event create/update/delete.
+ */
+async function checkSchedule() {
+  const reg = loadRegistry();
+
+  // Collect all MACs that appear in any event OR have a defaultGroup
+  const deviceMacs = new Set();
+  for (const event of Object.values(reg.events || {})) {
+    for (const sub of event.subEvents || []) {
+      for (const mac of sub.devices || []) deviceMacs.add(mac);
+    }
+  }
+  for (const [mac, dev] of Object.entries(reg.devices || {})) {
+    if (dev.defaultGroup) deviceMacs.add(mac);
+  }
+
+  const changes = [];
+  for (const mac of deviceMacs) {
+    const device = reg.devices?.[mac];
+    if (!device) continue;
+    const desired = getDesiredAutoplay(mac, reg);
+    if (device.autoplay !== desired) {
+      changes.push({ mac, desired, device });
+    }
+  }
+
+  if (changes.length === 0) return;
+
+  // Save all changes to registry
+  for (const { mac, desired, device } of changes) {
+    device.autoplay = desired;
+  }
+  saveRegistry(reg);
+
+  // Best-effort apply
+  for (const { mac, desired, device } of changes) {
+    if (desired && device.tvIp) {
+      log('info', `[scheduler] switching ${mac} to "${desired}"`);
+      playFolder(device.tvIp, desired, null, 1).catch(e => {
+        log('warn', `[scheduler] play failed for ${mac}: ${e.message}`);
+      });
+    } else if (!desired && device.tvIp) {
+      log('info', `[scheduler] turning off autoplay for ${mac}`);
+      // Best-effort: disable autoplay mode on player
+      getPlayerIP(device.tvIp).then(playerIP =>
+        playerRequest(playerIP, `/cgi-bin/cgictrl?V=S,2A,2,0,0,%00,`, 'POST')
+      ).catch(e => {
+        log('warn', `[scheduler] stop failed for ${mac}: ${e.message}`);
+      });
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Active session store  { id → Session }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -728,12 +865,16 @@ async function handleApi(method, pathname, body, req) {
 
       wsBroadcast({ type: 'device-online', category: 'tv', mac, name: device.name, ip, power });
 
-      // Restore autoplay if the device had a folder playing before it went offline.
-      // Fire-and-forget with a short delay to let the TV finish booting.
-      // autoplay=null means the user explicitly turned it off — don't restore.
-      // autoplay missing/undefined means we have no prior state — don't assume.
-      if (device.autoplay) {
-        const folder = device.autoplay;
+      // Determine what this device should be playing:
+      // 1. Active scheduled event takes priority
+      // 2. Otherwise use defaultGroup (or existing autoplay for legacy compat)
+      const desired = getDesiredAutoplay(mac, reg);
+      const folder  = desired || device.autoplay || null;
+      if (folder) {
+        if (device.autoplay !== folder) {
+          device.autoplay = folder;
+          saveRegistry(reg);
+        }
         log('info', `[device-online] Scheduling autoplay restore: "${folder}" on ${ip} in 5s`);
         setTimeout(() => {
           playFolder(ip, folder, null, 1).catch(e => {
@@ -1084,6 +1225,172 @@ async function handleApi(method, pathname, body, req) {
     log('info', `Pushing ${files.length} file(s) → "${groupName}" on ${device.name || mac} (${tvIP})`);
     const result = await pushGroupToPlayer(tvIP, groupName, files);
     return { ok: true, ...result };
+  }
+
+  // ─── Events / scheduling ──────────────────────────────────────────────────
+
+  // GET /api/events  — list all events
+  if (method === 'GET' && pathname === '/api/events') {
+    const reg = loadRegistry();
+    return { events: reg.events || {} };
+  }
+
+  // GET /api/events/active  — currently active sub-events across all devices
+  if (method === 'GET' && pathname === '/api/events/active') {
+    const reg    = loadRegistry();
+    const now    = new Date();
+    const active = [];
+    for (const [eventId, event] of Object.entries(reg.events || {})) {
+      for (const sub of event.subEvents || []) {
+        if (now >= new Date(sub.start) && now < new Date(sub.end)) {
+          active.push({ eventId, eventName: event.name, subEvent: sub });
+        }
+      }
+    }
+    return { active };
+  }
+
+  // GET /api/events/:id
+  if (method === 'GET' && /^\/api\/events\/[^/]+$/.test(pathname) && pathname !== '/api/events/active') {
+    const id  = pathname.split('/')[3];
+    const reg = loadRegistry();
+    const event = reg.events?.[id];
+    if (!event) return { error: 'event not found' };
+    return { id, ...event };
+  }
+
+  // POST /api/events  { name, subEvents: [{ name, groupId, devices, start, end }] }
+  if (method === 'POST' && pathname === '/api/events') {
+    const { name, subEvents } = body;
+    if (!name) return { error: 'name required' };
+    if (!subEvents?.length) return { error: 'at least one subEvent required' };
+
+    const reg     = loadRegistry();
+    const eventId = newId();
+
+    // Assign IDs to sub-events
+    const subs = subEvents.map(s => ({
+      id:      newId(),
+      name:    s.name || '',
+      groupId: s.groupId,
+      devices: (s.devices || []).map(m => normalizeMac(m)),
+      start:   s.start,
+      end:     s.end,
+    }));
+
+    // Validate
+    for (const s of subs) {
+      if (!s.groupId) return { error: `subEvent "${s.name}" missing groupId` };
+      if (!s.devices.length) return { error: `subEvent "${s.name}" has no devices` };
+      if (!s.start || !s.end) return { error: `subEvent "${s.name}" missing start/end` };
+      if (new Date(s.end) <= new Date(s.start))
+        return { error: `subEvent "${s.name}" end must be after start` };
+    }
+
+    const proposed = { name, subEvents: subs };
+    const conflicts = validateEvent(proposed, null, reg);
+    if (conflicts.length > 0) return { error: 'scheduling conflict', conflicts };
+
+    if (!reg.events) reg.events = {};
+    reg.events[eventId] = proposed;
+    saveRegistry(reg);
+    log('info', `[events] Created event "${name}" (${eventId}) with ${subs.length} sub-event(s)`);
+
+    // Trigger scheduler to apply any immediately active sub-events
+    checkSchedule().catch(() => {});
+
+    return { ok: true, id: eventId, event: proposed };
+  }
+
+  // PUT /api/events/:id  { name?, subEvents? }
+  if (method === 'PUT' && /^\/api\/events\/[^/]+$/.test(pathname)) {
+    const id  = pathname.split('/')[3];
+    const reg = loadRegistry();
+    if (!reg.events?.[id]) return { error: 'event not found' };
+
+    const updated = { ...reg.events[id] };
+    if (body.name) updated.name = body.name;
+    if (body.subEvents) {
+      updated.subEvents = body.subEvents.map(s => ({
+        id:      s.id || newId(),
+        name:    s.name || '',
+        groupId: s.groupId,
+        devices: (s.devices || []).map(m => normalizeMac(m)),
+        start:   s.start,
+        end:     s.end,
+      }));
+      for (const s of updated.subEvents) {
+        if (!s.groupId) return { error: `subEvent "${s.name}" missing groupId` };
+        if (!s.devices.length) return { error: `subEvent "${s.name}" has no devices` };
+        if (!s.start || !s.end) return { error: `subEvent "${s.name}" missing start/end` };
+        if (new Date(s.end) <= new Date(s.start))
+          return { error: `subEvent "${s.name}" end must be after start` };
+      }
+    }
+
+    const conflicts = validateEvent(updated, id, reg);
+    if (conflicts.length > 0) return { error: 'scheduling conflict', conflicts };
+
+    reg.events[id] = updated;
+    saveRegistry(reg);
+    log('info', `[events] Updated event "${updated.name}" (${id})`);
+
+    checkSchedule().catch(() => {});
+    return { ok: true, id, event: updated };
+  }
+
+  // DELETE /api/events/:id
+  if (method === 'DELETE' && /^\/api\/events\/[^/]+$/.test(pathname)) {
+    const id  = pathname.split('/')[3];
+    const reg = loadRegistry();
+    if (!reg.events?.[id]) return { error: 'event not found' };
+    const name = reg.events[id].name;
+    delete reg.events[id];
+    saveRegistry(reg);
+    log('info', `[events] Deleted event "${name}" (${id})`);
+
+    checkSchedule().catch(() => {});
+    return { ok: true };
+  }
+
+  // POST /api/devices/:mac/default-group  { groupId }
+  // Sets the default asset group for a device.
+  // Immediately plays it if no scheduled event is active on this device.
+  if (method === 'POST' && /^\/api\/devices\/[^/]+\/default-group$/.test(pathname)) {
+    const mac     = normalizeMac(pathname.split('/')[3]);
+    const { groupId } = body;
+    const reg = loadRegistry();
+    if (!reg.devices?.[mac]) return { error: 'device not found' };
+
+    reg.devices[mac].defaultGroup = groupId || null;
+    saveRegistry(reg);
+
+    const active = getActiveSubEvent(mac, reg);
+    if (active) {
+      return {
+        ok: true, saved: true, applied: false,
+        activeEvent: { eventId: active.eventId, eventName: active.event.name,
+                       subEventName: active.subEvent.name },
+      };
+    }
+
+    // No active event — play immediately
+    const folder = groupId && reg.groups?.[groupId]?.name;
+    if (folder && reg.devices[mac].tvIp) {
+      reg.devices[mac].autoplay = folder;
+      saveRegistry(reg);
+      try {
+        await playFolder(reg.devices[mac].tvIp, folder, null, 1);
+        return { ok: true, saved: true, applied: true };
+      } catch(e) {
+        return { ok: true, saved: true, applied: false, applyError: e.message };
+      }
+    }
+
+    // No folder or no IP — just saved
+    reg.devices[mac].autoplay = folder || null;
+    saveRegistry(reg);
+    return { ok: true, saved: true, applied: false };
   }
 
   // POST /api/restart
@@ -2119,6 +2426,12 @@ function readRawBody(req) {
 
 server.listen(PORT, () => {
   console.log(`\n  NEC Monitor Control Console  →  http://localhost:${PORT}\n`);
+
+  // Start the event scheduler — runs every 60 seconds + on startup
+  checkSchedule().catch(e => log('warn', `[scheduler] startup check failed: ${e.message}`));
+  setInterval(() => {
+    checkSchedule().catch(e => log('warn', `[scheduler] tick failed: ${e.message}`));
+  }, 60_000);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

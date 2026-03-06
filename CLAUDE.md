@@ -141,6 +141,65 @@ The emergency system works even if the display is in normal media player mode.
 
 ---
 
+## Event Scheduling System
+
+Time-based automation for switching display content during events.
+
+### Concepts
+
+- **Event**: a named container (e.g. "Conference 2026") with one or more sub-events.
+- **Sub-event**: a time window + asset group + set of devices. All named devices show the
+  sub-event's group for the duration.
+- **Default group** (`device.defaultGroup`): the group a device shows when no event is active.
+  Set via the Devices tab badge clicks.
+- **Conflict**: a device cannot be in two overlapping sub-events.
+
+### Data Model
+
+Added to `registry.json`:
+
+```javascript
+events: {
+  "<eventId>": {
+    name: "Conference 2026",
+    subEvents: [
+      {
+        id: "abc123",
+        name: "Morning Keynote",
+        groupId: "gid_xyz",          // asset group to display
+        devices: ["aa:bb:cc:dd:ee:ff", ...],  // MAC addresses
+        start: "2026-03-10T09:00",   // local time, hour granularity
+        end: "2026-03-10T12:00"
+      }
+    ]
+  }
+}
+```
+
+Each device gains `defaultGroup: "gid_abc"` — the group shown when no event is active.
+
+### Scheduler
+
+`checkSchedule()` runs every 60 seconds and on startup. For each device:
+1. Check if a scheduled sub-event is active → play that group
+2. Otherwise → play `defaultGroup`
+3. If desired state differs from `device.autoplay` → save + apply
+
+Also triggered after event create/update/delete.
+
+On `device-online`, the handler calls `getDesiredAutoplay(mac, reg)` to determine whether to
+restore an event group or the default.
+
+### Key Functions (server.js)
+
+- `getActiveSubEvent(mac, reg)` → `{ eventId, event, subEvent }` or `null`
+- `findConflicts(devices, start, end, excludeEventId, excludeSubId, reg)` → conflict array
+- `validateEvent(event, excludeEventId, reg)` → all conflicts for an event
+- `getDesiredAutoplay(mac, reg)` → folder name string or `null`
+- `checkSchedule()` → scans all devices, applies correct autoplay state
+
+---
+
 ## API Routes
 
 All routes accept/return JSON. `sessionId` is required for TV-side operations.
@@ -178,9 +237,21 @@ POST /api/emergency-upload?tvIP=x.x.x.x   (multipart/form-data files)
 ### Asset Cache
 ```
 GET  /api/cache
+GET  /api/cache/:hash/file                   → stream raw file (for thumbnails)
 POST /api/cache/store      (multipart/form-data)
 POST /api/cache/send       { hash, tvIP }
 DELETE /api/cache/:hash
+```
+
+### Events (scheduling)
+```
+GET    /api/events                            → list all events
+POST   /api/events           { name, subEvents }  → create event
+GET    /api/events/:id                        → single event
+PUT    /api/events/:id       { name?, subEvents? } → update event
+DELETE /api/events/:id                        → delete event
+GET    /api/events/active                     → currently active sub-events
+POST   /api/devices/:mac/default-group  { groupId } → set default display group
 ```
 
 ### Utilities
