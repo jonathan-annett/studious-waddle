@@ -1738,10 +1738,15 @@ async function setAutoPlay(playerIP, folderPath, mode = 1) {
   await playerRequest(playerIP, `/cgi-bin/cgictrl?V=S,2A,2,0,${mode},%00,`, 'POST');
   log('info', `  autoplay mode=${mode}`);
 
-  // V=S,2B — folder path. Slashes are safe here as value comes after comma delimiter.
-  // Length = raw path length + 1 (null terminator).
-  const len = folderPath.length + 1;
-  await playerRequest(playerIP, `/cgi-bin/cgictrl?V=S,2B,${len},1,${folderPath},%00,`, 'POST');
+  // V=S,2B — folder path.
+  // len = raw (decoded) byte count + 1 null terminator — firmware reads this number.
+  // The path must be HTTP-safe: encode each path segment individually so that spaces, #, &
+  // etc become percent-sequences, but join with '/' to keep slash separators literal.
+  // Do NOT encodeURIComponent the full string — that encodes '/' as '%2F' which the firmware
+  // cannot handle (hard-won bug, see CLAUDE.md).
+  const len         = folderPath.length + 1;
+  const encodedPath = folderPath.split('/').map(encodeURIComponent).join('/');
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?V=S,2B,${len},1,${encodedPath},%00,`, 'POST');
   log('info', `  autoplay folder=${folderPath}`);
 }
 
