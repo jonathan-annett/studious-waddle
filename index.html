@@ -1139,6 +1139,11 @@ function renderPlayer() {
         <option value="15">DisplayPort1</option>
         <option value="16">DisplayPort2</option>
       </select>
+      <span style="font-size:11px;color:var(--muted)">Slide duration:</span>
+      <input type="number" id="player-interval" value="30" min="5" max="99999"
+        style="width:65px;background:var(--bg);border:1px solid var(--border);color:var(--text);
+               padding:4px 8px;border-radius:3px;font-family:var(--mono);font-size:12px">
+      <span style="font-size:11px;color:var(--muted)">s &nbsp;(single-file folders use ∞)</span>
     </div>
     <div style="margin-bottom:10px;font-family:var(--mono);font-size:11px;color:var(--muted)">
       Active folder: <span id="player-current-folder">unknown — click ↻</span>
@@ -1163,25 +1168,34 @@ async function refreshPlayerFolder() {
 }
 
 async function doPlayFolder(folder) {
-  const tvIP        = document.getElementById('player-tv-ip')?.value?.trim();
+  const tvIP         = document.getElementById('player-tv-ip')?.value?.trim();
   const restoreInput = parseInt(document.getElementById('player-restore-input')?.value ?? '17', 10);
-  const resultEl    = document.getElementById('player-result');
+  const interval     = parseInt(document.getElementById('player-interval')?.value ?? '30', 10);
+  const resultEl     = document.getElementById('player-result');
   if (!tvIP) { alert('Enter a TV IP first'); return; }
 
-  // Highlight active button
+  // Mark button as pending
   PLAYER_FOLDERS.forEach(f => {
     const b = document.getElementById(`player-btn-${f}`);
-    if (b) b.className = f === folder ? 'btn-primary' : 'btn-secondary';
+    if (b) b.className = 'btn-secondary';
   });
+  const activeBtn = document.getElementById(`player-btn-${folder}`);
+  if (activeBtn) activeBtn.className = 'btn-warn';
 
-  resultEl.innerHTML = `<span style="color:var(--muted)">Switching to ${folder}…</span>`;
+  resultEl.innerHTML = `<span style="color:var(--muted)">Checking folder contents…</span>`;
   try {
-    const r = await api('/player/play', { tvIP, folder, restoreInput });
-    document.getElementById('player-current-folder').textContent = r.folder ?? folder;
-    resultEl.innerHTML = r.ok
-      ? `<span class="ok-text">✓ Now playing: ${esc(r.folder)}</span>`
-      : `<span class="error-text">Error: ${esc(JSON.stringify(r))}</span>`;
+    const r = await api('/player/play', { tvIP, folder, restoreInput, interval });
+    if (!r.ok) {
+      if (activeBtn) activeBtn.className = 'btn-secondary';
+      resultEl.innerHTML = `<span class="error-text">✗ ${esc(r.error ?? 'failed')}</span>`;
+      return;
+    }
+    if (activeBtn) activeBtn.className = 'btn-primary';
+    const intervalStr = r.interval >= 99999 ? '∞' : r.interval + 's';
+    document.getElementById('player-current-folder').textContent = folder;
+    resultEl.innerHTML = `<span class="ok-text">✓ Playing: ${esc(folder)} — ${r.fileCount} file(s), ${intervalStr}/slide</span>`;
   } catch(e) {
+    if (activeBtn) activeBtn.className = 'btn-secondary';
     resultEl.innerHTML = `<span class="error-text">${esc(e.message)}</span>`;
   }
 }

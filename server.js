@@ -383,16 +383,30 @@ async function handleApi(method, pathname, body, req) {
     return { ...r, method: 'formal-delete' };
   }
 
-  // POST /api/player/play  { sessionId, tvIP, folder, restoreInput? }
+  // POST /api/player/play  { sessionId, tvIP, folder, restoreInput?, interval? }
   // Sets the media player autoplay folder, restarts playback, switches TV input to MP.
   // Bounces input if already on MP so the player picks up the new folder.
+  // interval: seconds per slide. Omit to use server default (30s).
+  //           Automatically overridden to 99999 if folder has only 1 file.
+  //           Returns { error } if folder is empty.
   if (method === 'POST' && pathname === '/api/player/play') {
-    const { sessionId, monitorId, tvIP, folder, restoreInput } = body;
+    const { sessionId, monitorId, tvIP, folder, restoreInput, interval } = body;
     if (!tvIP)    return { error: 'tvIP required' };
     if (!folder)  return { error: 'folder required' };
     const s   = sessions.get(sessionId);
     const mid = monitorId ?? s?.monitorId;
-    return playFolder(tvIP, folder, s?.session ?? null, mid, restoreInput ?? 0x11);
+    return playFolder(tvIP, folder, s?.session ?? null, mid, restoreInput ?? 0x11, interval ?? INTERVAL_DEFAULT);
+  }
+
+  // POST /api/player/filelist  { tvIP, folder }
+  // Returns the file count and names inside a named folder on the player SD card.
+  if (method === 'POST' && pathname === '/api/player/filelist') {
+    const { tvIP, folder } = body;
+    if (!tvIP)   return { error: 'tvIP required' };
+    if (!folder) return { error: 'folder required' };
+    const playerIP = await getPlayerIP(tvIP);
+    const result   = await getPlayerFolderContents(playerIP, folder);
+    return { ok: true, playerIP, folder, ...result };
   }
 
   // POST /api/player/stop  { sessionId, tvIP, restoreInput? }
@@ -417,12 +431,10 @@ async function handleApi(method, pathname, body, req) {
     if (!tvIP) return { error: 'tvIP required' };
     const playerIP = await getPlayerIP(tvIP);
     const raw      = await playerRequest(playerIP, `/cgi-bin/cgictrl?V=G,2B,1,0,%00,`, 'POST');
-    // Parse: G,2B,len,type,result,<value>,%00,
-    const parts  = raw.split(',');
-    const folder = parts[5] ?? null;
+    const parts    = raw.split(',');
+    const folder   = parts[5] ?? null;
     return { ok: true, playerIP, folder, raw };
   }
-
 
 
   // GET /api/cache  — list all cached assets (reads sidecars)
@@ -1073,8 +1085,10 @@ async function emergencyUploadFiles(tvIP, files) {
 
 // ─── Media player folder playback ─────────────────────────────────────────────
 
-const MEDIA_PLAYER_INPUT = 0x87;
-const PLAYER_ROOT        = '/mnt/usb1';
+const MEDIA_PLAYER_INPUT  = 0x87;
+const PLAYER_ROOT         = '/mnt/usb1';
+const INTERVAL_INFINITE   = 99999; // firmware accepts up to 99999s (~27hrs)
+const INTERVAL_DEFAULT    = 30;
 
 /**
  * Set the AUTO PLAY folder on the media player.
@@ -1093,6 +1107,17 @@ async function setAutoPlay(playerIP, folderPath, mode = 1) {
 }
 
 /**
+ * Set the slideshow interval (seconds).
+ * Firmware accepts 5–99999. Use INTERVAL_INFINITE for single-slide display.
+ */
+async function setSlideInterval(playerIP, seconds) {
+  const val = String(Math.max(5, Math.min(99999, Math.round(seconds))));
+  const len = val.length + 1;
+  const r   = await playerRequest(playerIP, `/cgi-bin/cgictrl?V=S,22,${len},0,${val},%00,`, 'POST');
+  log('info', `  interval=${val}s -> ${r.slice(0, 40)}`);
+}
+
+/**
  * Restart the media player (RSG= commits pending changes and restarts playback).
  */
 async function restartPlayer(playerIP) {
@@ -1102,19 +1127,67 @@ async function restartPlayer(playerIP) {
 }
 
 /**
+ * Read the filelist for a given folder on the player.
+ * Returns { fileCount, files } where files is the raw fileinfo array.
+ * Navigates into the folder by index from root listing.
+ */
+async function getPlayerFolderContents(playerIP, folder) {
+  // Go to root
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
+
+  // Read root filelist to find folder index
+  const rootRaw = await playerRequest(playerIP, `/mmb/filelist.json?_=${Date.now()}`, 'GET',
+    null, { referer: `http://${playerIP}/sd_card_viewer.html` });
+  const rootFixed = rootRaw.replace(/,(\s*\])/g, '$1');
+  const root = JSON.parse(rootFixed);
+
+  const folderIdx = root.fileinfo.findIndex(f => f.name === folder && f.type === 0);
+  if (folderIdx < 0) throw new Error(`Folder "${folder}" not found on player`);
+
+  // Navigate into folder
+  const idxStr = String(folderIdx).padStart(3, '0');
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=${idxStr}`, 'POST');
+
+  // Read folder contents
+  const raw   = await playerRequest(playerIP, `/mmb/filelist.json?_=${Date.now()}`, 'GET',
+    null, { referer: `http://${playerIP}/sd_card_viewer.html` });
+  const fixed = raw.replace(/,(\s*\])/g, '$1');
+  const list  = JSON.parse(fixed);
+
+  // Navigate back to root
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
+
+  const files = (list.fileinfo || []).filter(f => f.name !== '..' && f.type !== 0);
+  return { fileCount: files.length, files };
+}
+
+/**
  * Full "play this folder" flow:
  *  1. Discover player IP from TV
- *  2. If already on MP input, bounce to restoreInput first so the player restarts cleanly
- *  3. Set autoplay folder + mode
- *  4. Restart player (RSG=)
- *  5. Switch TV input to MP
+ *  2. Check folder contents — abort if empty
+ *  3. Decide interval: 99999 for single file, caller-supplied for multiple
+ *  4. If already on MP input, bounce away first so the player restarts cleanly
+ *  5. Set autoplay folder + mode + interval
+ *  6. Restart player (RSG=)
+ *  7. Switch TV input to MP
  */
-async function playFolder(tvIP, folder, session, monitorId, restoreInput = 0x11) {
+async function playFolder(tvIP, folder, session, monitorId, restoreInput = 0x11, interval = INTERVAL_DEFAULT) {
   const folderPath = `${PLAYER_ROOT}/${folder}`;
   log('info', `[player/play] folder=${folderPath} tv=${tvIP}`);
 
   const playerIP = await getPlayerIP(tvIP);
   log('info', `[player/play] playerIP=${playerIP}`);
+
+  // Check folder contents
+  const { fileCount, files } = await getPlayerFolderContents(playerIP, folder);
+  log('info', `[player/play] fileCount=${fileCount}`);
+  if (fileCount === 0) {
+    return { ok: false, error: 'folder is empty', folder: folderPath };
+  }
+
+  // Decide interval
+  const chosenInterval = fileCount === 1 ? INTERVAL_INFINITE : interval;
+  log('info', `[player/play] interval=${chosenInterval}s (${fileCount} file(s))`);
 
   // Read current input
   let currentInput = null;
@@ -1136,6 +1209,7 @@ async function playFolder(tvIP, folder, session, monitorId, restoreInput = 0x11)
   }
 
   await setAutoPlay(playerIP, folderPath);
+  await setSlideInterval(playerIP, chosenInterval);
   await restartPlayer(playerIP);
 
   // Switch TV input to MP
@@ -1144,7 +1218,7 @@ async function playFolder(tvIP, folder, session, monitorId, restoreInput = 0x11)
     log('info', `[player/play] input switch to MP -> ${JSON.stringify(r)}`);
   }
 
-  return { ok: true, tvIP, playerIP, folder: folderPath };
+  return { ok: true, tvIP, playerIP, folder: folderPath, fileCount, interval: chosenInterval };
 }
 
 function hex(n) { return '0x' + n.toString(16).toUpperCase().padStart(2, '0'); }
