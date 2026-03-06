@@ -192,6 +192,7 @@ POST /api/serial           { sessionId }
 POST /api/model            { sessionId }
 POST /api/firmware         { sessionId }
 POST /api/mac              { sessionId }
+POST /api/restart                        → exits process (triggers --dev loop git pull + restart)
 ```
 
 ---
@@ -268,13 +269,39 @@ CLAUDE.md          This file
 
 ---
 
+## Running the Server
+
+### Production / normal start
+```bash
+cd /server/claude12
+./run          # sets NEC_CACHE_DIR and NEC_SUBNET, then runs node server.js 4000
+```
+
+### Dev / auto-restart loop
+```bash
+./run --dev    # loops: git pull → node server.js → on exit, repeat
+```
+`--dev` mode is the normal way to run in deployment. The loop means any clean exit
+(including via `POST /api/restart`) triggers an automatic `git pull` + restart.
+
+### Deploying a new version (from dev machine)
+```bash
+# Claude handles the first two steps automatically:
+git push
+curl -s -X POST http://<router-ip>:4000/api/restart
+# The server exits cleanly, the loop pulls the new commit, restarts within ~5s.
+```
+
+### First-time setup on the router
+```bash
+git pull && chmod +x run
+# Kill any existing node process, then:
+./run --dev
+```
+
 ## Typical Test Session
 
 ```bash
-# On router
-cd /server/claude12
-node server.js
-
 # In browser — http://<router-ip>:4000
 # 1. Enter TV IP (192.168.100.198), click Connect
 # 2. Click Interrogate All to populate all cards
