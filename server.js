@@ -49,7 +49,7 @@ const REGISTRY_FILE = path.join(CACHE_DIR, 'registry.json');
 
 function loadRegistry() {
   try { return JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8')); }
-  catch { return { groups: {}, devices: {}, players: {} }; }
+  catch { return { groups: {}, devices: {}, players: {}, events: {} }; }
 }
 
 function saveRegistry(reg) {
