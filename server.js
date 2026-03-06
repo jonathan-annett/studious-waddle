@@ -235,11 +235,18 @@ function broadcastScheduleStatus() {
 /**
  * Scheduler: check all event-involved devices and apply correct autoplay state.
  * Called every 60s and after event create/update/delete.
+ *
+ * Retry behaviour (play errors only):
+ *  - Each failed play attempt increments playRetryState[mac].retries
+ *  - Retries happen on successive ticks (≈60s apart)
+ *  - After 4 total attempts (1 initial + 3 retries) the device is marked as
+ *    failed and a { type: 'schedule-alert' } WS message is broadcast to the UI
+ *  - Retry state is cleared when desired state changes or device-online fires
  */
 async function checkSchedule() {
   const reg = loadRegistry();
 
-  // Collect all MACs that appear in any event OR have a defaultGroup
+  // Collect MACs in any event, any defaultGroup, or with a pending retry
   const deviceMacs = new Set();
   for (const event of Object.values(reg.events || {})) {
     for (const sub of event.subEvents || []) {
@@ -249,36 +256,63 @@ async function checkSchedule() {
   for (const [mac, dev] of Object.entries(reg.devices || {})) {
     if (dev.defaultGroup) deviceMacs.add(mac);
   }
+  for (const mac of playRetryState.keys()) deviceMacs.add(mac);
 
-  const changes = [];
+  // Build list of actions: new state changes + pending retries
+  const toApply = [];
   for (const mac of deviceMacs) {
     const device = reg.devices?.[mac];
     if (!device) continue;
     const desired = getDesiredAutoplay(mac, reg);
+
     if (device.autoplay !== desired) {
-      changes.push({ mac, desired, device });
+      // Desired state changed — reset any pending retry and apply new state
+      playRetryState.delete(mac);
+      device.autoplay = desired;
+      toApply.push({ mac, desired, device, isRetry: false });
+    } else if (playRetryState.has(mac)) {
+      const retry = playRetryState.get(mac);
+      if (retry.desired === desired) {
+        // Same desired state, previous play failed — queue a retry
+        toApply.push({ mac, desired, device, isRetry: true });
+      } else {
+        // Desired state changed since failure was recorded — reset
+        playRetryState.delete(mac);
+      }
     }
   }
 
-  if (changes.length === 0) return;
+  // Persist state changes (not retries — desired was already saved on first attempt)
+  if (toApply.some(t => !t.isRetry)) saveRegistry(reg);
 
-  // Save all changes to registry
-  for (const { mac, desired, device } of changes) {
-    device.autoplay = desired;
-  }
-  saveRegistry(reg);
+  if (toApply.length === 0) return;
 
-  // Best-effort apply
-  for (const { mac, desired, device } of changes) {
+  // Apply — play attempts use retry counting, stop attempts are best-effort only
+  for (const { mac, desired, device, isRetry } of toApply) {
     if (desired && device.tvIp) {
-      log('info', `[scheduler] switching ${mac} to "${desired}"`);
-      playFolder(device.tvIp, desired, null, 1).catch(e => {
-        log('warn', `[scheduler] play failed for ${mac}: ${e.message}`);
-      });
+      const attempt = isRetry ? (playRetryState.get(mac)?.retries ?? 0) + 1 : 1;
+      const label   = isRetry ? `retry ${attempt}/4` : 'switching';
+      log('info', `[scheduler] ${label}: ${mac} → "${desired}"`);
+
+      playFolder(device.tvIp, desired, null, 1)
+        .then(() => {
+          if (isRetry) log('info', `[scheduler] retry succeeded for ${mac}`);
+          playRetryState.delete(mac);
+        })
+        .catch(e => {
+          log('warn', `[scheduler] play failed for ${mac} (attempt ${attempt}/4): ${e.message}`);
+          if (attempt >= 4) {
+            log('warn', `[scheduler] giving up on ${mac} — broadcasting alert`);
+            playRetryState.delete(mac);
+            wsBroadcast({ type: 'schedule-alert', mac, deviceName: device.name || mac, error: e.message, desired });
+          } else {
+            playRetryState.set(mac, { retries: attempt, desired });
+          }
+        });
+
     } else if (!desired && device.tvIp) {
       log('info', `[scheduler] no active event or default group for ${mac} — stopping autoplay`);
-      // Best-effort: clear autoplay flag, then switch TV away from MP if it's on it.
-      // Same intent as /api/player/stop but without a pre-existing session.
+      // Best-effort stop: clear autoplay flag + switch TV away from MP.
       (async () => {
         const playerIP = await getPlayerIP(device.tvIp);
         await playerRequest(playerIP, `/cgi-bin/cgictrl?V=S,2A,2,0,0,%00,`, 'POST');
@@ -290,7 +324,7 @@ async function checkSchedule() {
           const inp = await tempSession.vcpGet(1, 0x00, 0x60);
           if (inp.current === MEDIA_PLAYER_INPUT) {
             await tempSession.vcpSet(1, 0x00, 0x60, SAFE_INPUT);
-            log('info', `[scheduler] TV input switched from MP to safe input 0x${SAFE_INPUT.toString(16)} for ${mac}`);
+            log('info', `[scheduler] TV input switched to safe input for ${mac}`);
           }
         } finally {
           if (tempSession) await tempSession.close().catch(() => {});
@@ -307,6 +341,14 @@ async function checkSchedule() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const sessions = new Map();
+
+// In-memory retry state for scheduler play failures.
+// { mac → { retries: number, desired: string|null } }
+// Entries are keyed by MAC. retries counts *completed failed attempts* (1–3).
+// After 4 total attempts (1 initial + 3 retries) the entry is deleted and a
+// schedule-alert is broadcast. Resets whenever desired state changes or the
+// device comes back online and is handled by device-online.
+const playRetryState = new Map();
 
 function newId() { return crypto.randomBytes(6).toString('hex'); }
 
@@ -975,11 +1017,29 @@ async function handleApi(method, pathname, body, req) {
           device.autoplay = folder;
           saveRegistry(reg);
         }
+
+        // Resolve the asset group so we can push files before playing.
+        // The device may have been offline for a long time — assets could be stale.
+        const activeEvt = getActiveSubEvent(mac, reg);
+        const groupId   = activeEvt?.subEvent.groupId ?? device.defaultGroup ?? null;
+        const group     = groupId ? reg.groups?.[groupId] : null;
+
+        // Clear any pending retry — this online event supersedes the scheduler's attempts.
+        playRetryState.delete(mac);
+
         log('info', `[device-online] Scheduling autoplay restore: "${folder}" on ${ip} in 5s`);
-        setTimeout(() => {
-          playFolder(ip, folder, null, 1).catch(e => {
+        setTimeout(async () => {
+          try {
+            if (group) {
+              log('info', `[device-online] Pushing assets for "${group.name}" to ${ip}`);
+              await pushEventGroup(ip, group, reg).catch(e =>
+                log('warn', `[device-online] asset push failed for ${mac}: ${e.message}`)
+              );
+            }
+            await playFolder(ip, folder, null, 1);
+          } catch (e) {
             log('warn', `[device-online] autoplay restore failed for ${mac}: ${e.message}`);
-          });
+          }
         }, 5000);
       }
 
