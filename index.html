@@ -1,0 +1,1480 @@
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NEC Monitor Control</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+
+  :root {
+    --bg:      #0a0c0f;
+    --surface: #111318;
+    --border:  #1e2230;
+    --accent:  #00e5a0;
+    --accent2: #0088ff;
+    --warn:    #ff9500;
+    --danger:  #ff3b30;
+    --ok:      #00e5a0;
+    --text:    #c8d0e0;
+    --text-primary: #c8d0e0;
+    --text-dim: #4a5270;
+    --muted:   #4a5270;
+    --bg-input: #0a0c0f;
+    --mono:    'IBM Plex Mono', monospace;
+    --sans:    'IBM Plex Sans', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 13px; }
+
+  body { display: grid; grid-template-rows: 48px 1fr; grid-template-columns: 1fr 340px; height: 100vh; overflow: hidden; }
+  #content-area { overflow-y: auto; display: flex; flex-direction: column; }
+
+  /* ── Header ── */
+  header {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; gap: 16px;
+    padding: 0 20px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  header .logo { font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .15em; color: var(--accent); text-transform: uppercase; }
+  header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  header .dot.live { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  header input[type=text] { font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 4px; width: 200px; outline: none; }
+  header input[type=text]:focus { border-color: var(--accent2); }
+  header input[type=number] { font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 4px; width: 70px; outline: none; }
+  header label { color: var(--muted); font-size: 11px; }
+  header .spacer { flex: 1; }
+
+  /* ── Buttons ── */
+  button { cursor: pointer; font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; padding: 6px 14px; border-radius: 4px; border: 1px solid transparent; transition: all .15s; }
+  .btn-primary { background: var(--accent); color: #000; border-color: var(--accent); }
+  .btn-primary:hover { background: #00ffc0; }
+  .btn-primary:disabled { opacity: .35; cursor: not-allowed; }
+  .btn-secondary { background: transparent; color: var(--text); border-color: var(--border); }
+  .btn-secondary:hover { border-color: var(--accent2); color: var(--accent2); }
+  .btn-secondary:disabled { opacity: .35; cursor: not-allowed; }
+  .btn-danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+  .btn-danger:hover { background: var(--danger); color: #fff; }
+  .btn-warn { background: transparent; color: var(--warn); border-color: var(--warn); }
+  .btn-warn:hover { background: var(--warn); color: #000; }
+
+  /* ── Main ── */
+  main { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  #scanner-wrap { padding: 12px 20px 0; }
+
+  /* ── Log panel ── */
+  #log-panel {
+    grid-row: 2;
+    border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  #log-panel .log-header { padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  #log-panel .log-header span { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; color: var(--muted); text-transform: uppercase; }
+  #log-entries { flex: 1; overflow-y: auto; padding: 8px 0; font-family: var(--mono); font-size: 11px; line-height: 1.7; }
+  .log-entry { padding: 2px 14px; display: flex; gap: 8px; border-left: 2px solid transparent; }
+  .log-entry.info  { border-color: var(--accent2); color: var(--text); }
+  .log-entry.warn  { border-color: var(--warn);    color: var(--warn); }
+  .log-entry.error { border-color: var(--danger);  color: var(--danger); }
+  .log-entry .lts  { color: var(--muted); flex-shrink: 0; }
+
+  /* ── Cards ── */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+  .card-header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .card-header h2 { font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); flex: 1; }
+  .card-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+
+  /* ── Grid of settings ── */
+  .settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+  .setting-item { background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .setting-item label { font-family: var(--mono); font-size: 10px; color: var(--muted); letter-spacing: .1em; text-transform: uppercase; }
+  .setting-item .val { font-family: var(--mono); font-size: 18px; color: var(--text); }
+  .setting-item .val-sub { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+  .setting-item .controls { display: flex; gap: 6px; align-items: center; }
+  .setting-item input[type=range] { flex: 1; accent-color: var(--accent); }
+  .setting-item input[type=number] { font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 4px; width: 70px; outline: none; }
+  .setting-item input[type=number]:focus { border-color: var(--accent2); }
+
+  /* ── Status badge ── */
+  .badge { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 10px; padding: 2px 8px; border-radius: 3px; }
+  .badge-green  { background: rgba(0,229,160,.1); color: var(--accent); border: 1px solid rgba(0,229,160,.3); }
+  .badge-blue   { background: rgba(0,136,255,.1); color: var(--accent2); border: 1px solid rgba(0,136,255,.3); }
+  .badge-yellow { background: rgba(255,149,0,.1);  color: var(--warn);   border: 1px solid rgba(255,149,0,.3); }
+  .badge-red    { background: rgba(255,59,48,.1);  color: var(--danger); border: 1px solid rgba(255,59,48,.3); }
+  .badge-grey   { background: rgba(74,82,112,.2);  color: var(--muted);  border: 1px solid var(--border); }
+
+  /* ── Table ── */
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
+  th { text-align: left; padding: 6px 10px; color: var(--muted); border-bottom: 1px solid var(--border); letter-spacing: .08em; font-weight: 400; }
+  td { padding: 7px 10px; border-bottom: 1px solid rgba(30,34,48,.6); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  /* ── Form row ── */
+  .form-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+  .form-group { display: flex; flex-direction: column; gap: 4px; }
+  .form-group label { font-size: 10px; font-family: var(--mono); color: var(--muted); letter-spacing: .1em; text-transform: uppercase; }
+  .form-group input, .form-group select {
+    font-family: var(--mono); font-size: 12px;
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 5px 8px; border-radius: 4px; outline: none;
+  }
+  .form-group input:focus, .form-group select:focus { border-color: var(--accent2); }
+  select option { background: var(--bg); }
+
+  /* ── Misc ── */
+  .error-text { color: var(--danger); font-family: var(--mono); font-size: 11px; }
+  .ok-text    { color: var(--accent);  font-family: var(--mono); font-size: 11px; }
+  .kv-grid    { display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px; font-size: 12px; }
+  .kv-label   { color: var(--muted); font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; display: flex; align-items: center; }
+  .kv-value   { color: var(--text); font-family: var(--mono); }
+  .mono { font-family: var(--mono); }
+  .flex-gap { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  hr { border: none; border-top: 1px solid var(--border); }
+  #not-connected { color: var(--muted); font-family: var(--mono); font-size: 13px; text-align: center; padding: 40px; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="logo">NEC&nbsp;Control</span>
+  <span class="dot" id="status-dot"></span>
+  <label>Host</label>
+  <input type="text"   id="inp-host"      placeholder="192.168.1.100" value="">
+  <label>Port</label>
+  <input type="number" id="inp-port"      placeholder="7142" value="7142" min="1" max="65535">
+  <label>Monitor ID</label>
+  <input type="number" id="inp-monitor-id" placeholder="1" value="1" min="1" max="100">
+  <button class="btn-primary"    id="btn-connect"     onclick="connect()">Connect</button>
+  <button class="btn-secondary"  id="btn-interrogate" onclick="interrogate()" disabled>Interrogate All</button>
+  <button class="btn-danger"     id="btn-disconnect"  onclick="disconnect()" disabled>Disconnect</button>
+  <span class="spacer"></span>
+  <span id="session-label" style="font-family:var(--mono);font-size:10px;color:var(--muted)"></span>
+</header>
+
+<div id="content-area">
+  <div id="scanner-wrap">
+    <div class="card" id="card-scanner"></div>
+  </div>
+  <main id="main">
+    <div id="not-connected">Connect to a monitor to begin testing.</div>
+  </main>
+</div>
+
+<div id="log-panel">
+  <div class="log-header">
+    <span>Protocol Log</span>
+    <button class="btn-secondary" style="padding:3px 8px;font-size:10px" onclick="clearLog()">Clear</button>
+  </div>
+  <div id="log-entries"></div>
+</div>
+
+<script>
+// ─── state ─────────────────────────────────────────────────────────────────
+
+let sessionId  = null;
+let monitorId  = 1;
+let ws         = null;
+let lastData   = {};
+
+// ─── websocket log ──────────────────────────────────────────────────────────
+
+function initWs() {
+  ws = new WebSocket('ws://' + location.host);
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'log') addLog(msg.entry);
+  };
+  ws.onclose = () => setTimeout(initWs, 2000);
+}
+initWs();
+
+function addLog({ level, msg, data, ts }) {
+  const el   = document.getElementById('log-entries');
+  const d    = document.createElement('div');
+  d.className = 'log-entry ' + level;
+  const t    = new Date(ts).toTimeString().slice(0,8);
+  d.innerHTML = '<span class="lts">' + t + '</span><span>' + esc(msg) + (data ? ' ' + esc(JSON.stringify(data)) : '') + '</span>';
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearLog() { document.getElementById('log-entries').innerHTML = ''; }
+
+// ─── api helpers ────────────────────────────────────────────────────────────
+
+async function api(path, body, method) {
+  if (!method || method === 'POST') {
+    const r = await fetch('/api' + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, monitorId, ...body }),
+    });
+    const json = await r.json();
+    if (json.error) throw new Error(json.error);
+    return json;
+  }
+  // GET (no body)
+  const r = await fetch('/api' + path, { method });
+  const json = await r.json();
+  if (json.error) throw new Error(json.error);
+  return json;
+}
+
+// ─── connect / disconnect ───────────────────────────────────────────────────
+
+async function connect() {
+  const host = document.getElementById('inp-host').value.trim();
+  if (!host) { alert('Enter a host IP or hostname'); return; }
+  const port = parseInt(document.getElementById('inp-port').value) || 7142;
+  monitorId  = parseInt(document.getElementById('inp-monitor-id').value) || 1;
+
+  document.getElementById('btn-connect').disabled = true;
+  try {
+    const r = await fetch('/api/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, port, monitorId }),
+    });
+    const json = await r.json();
+    if (json.error) throw new Error(json.error);
+    sessionId = json.sessionId;
+    document.getElementById('status-dot').classList.add('live');
+    document.getElementById('session-label').textContent = 'session ' + sessionId;
+    document.getElementById('btn-connect').disabled     = true;
+    document.getElementById('btn-disconnect').disabled  = false;
+    document.getElementById('btn-interrogate').disabled = false;
+    renderUI();
+    interrogate();
+  } catch(e) {
+    alert('Connect failed: ' + e.message);
+    document.getElementById('btn-connect').disabled = false;
+  }
+}
+
+async function disconnect() {
+  if (!sessionId) return;
+  await fetch('/api/connect/' + sessionId, { method: 'DELETE' });
+  sessionId = null;
+  document.getElementById('status-dot').classList.remove('live');
+  document.getElementById('session-label').textContent = '';
+  document.getElementById('btn-connect').disabled     = false;
+  document.getElementById('btn-disconnect').disabled  = true;
+  document.getElementById('btn-interrogate').disabled = true;
+  document.getElementById('main').innerHTML = '<div id="not-connected">Connect to a monitor to begin testing.</div>';
+}
+
+// ─── interrogate ────────────────────────────────────────────────────────────
+
+async function interrogate() {
+  try {
+    const data = await api('/interrogate');
+    lastData = data;
+    populateUI(data);
+  } catch(e) {
+    console.error(e);
+  }
+}
+
+// ─── render skeleton ────────────────────────────────────────────────────────
+
+function renderUI() {
+  document.getElementById('main').innerHTML = `
+  <div class="card" id="card-overview"></div>
+  <div class="card" id="card-image"></div>
+  <div class="card" id="card-power"></div>
+  <div class="card" id="card-vcp-custom"></div>
+  <div class="card" id="card-timing"></div>
+  <div class="card" id="card-asset"></div>
+  <div class="card" id="card-datetime"></div>
+  <div class="card" id="card-schedule"></div>
+  <div class="card" id="card-holiday"></div>
+  <div class="card" id="card-weekend"></div>
+  <div class="card" id="card-input"></div>
+  <div class="card" id="card-diag"></div>
+  <div class="card" id="card-emergency"></div>
+  <div class="card" id="card-player"></div>
+  <div class="card" id="card-osd"></div>
+  <div class="card" id="card-upload"></div>
+  `;
+}
+
+// ─── populate all cards ─────────────────────────────────────────────────────
+
+function populateUI(data) {
+  renderOverview(data);
+  renderImageControls(data.vcp || {});
+  renderPower(data.power || {});
+  renderVcpCustom();
+  renderInput(data.vcp?.inputSource || {});
+  renderTiming(data.timing || {});
+  renderAsset(data.asset || {});
+  renderDateTime(data.dateTime || {});
+  renderSchedule(data.schedule || []);
+  renderHoliday(data.holiday || []);
+  renderWeekend(data.weekend || {});
+  renderDiag(data.selfDiag, data.vcp?.tempSensor, data.vcp?.ambientLight, data.vcp?.powerMode);
+  renderEmergency();
+  renderPlayer();
+  renderOsd(data.vcp?.infoOsd || {});
+  renderUpload();
+}
+
+// ─── overview ───────────────────────────────────────────────────────────────
+
+function renderOverview(data) {
+  const p = data.power   || {};
+  const t = data.timing  || {};
+  const modeBadge = { on:'badge-green', standby:'badge-yellow', suspend:'badge-yellow', off:'badge-red' };
+  const model    = data.model?.modelName   || '—';
+  const serial   = data.serial?.serial     || '—';
+  const firmware = data.firmware?.version  || '—';
+  const mac      = data.mac?.mac           || '—';
+
+  const POWER_MODE = { 1:'On', 2:'Standby', 3:'Suspend', 4:'Off', 5:'Hard Off' };
+  const pmVal  = data.vcp?.powerMode?.current;
+  const pmStr  = pmVal != null ? (POWER_MODE[pmVal] ?? ('0x' + pmVal.toString(16))) : '—';
+
+  document.getElementById('card-overview').innerHTML = `
+  <div class="card-header"><h2>Monitor Status</h2>
+    <button class="btn-secondary" onclick="doInterrogate()">↻ Refresh All</button>
+  </div>
+  <div class="card-body">
+    <div class="settings-grid">
+      <div class="setting-item">
+        <label>Power</label>
+        <div class="val"><span class="badge ${modeBadge[p.modeStr] || 'badge-grey'}">${p.modeStr || '—'}</span></div>
+      </div>
+      <div class="setting-item">
+        <label>Power Mode</label>
+        <div class="val">${pmStr}</div>
+      </div>
+      <div class="setting-item">
+        <label>H Frequency</label>
+        <div class="val">${t.hFreqKHz ? t.hFreqKHz.toFixed(2) : '—'}<span style="font-size:12px;margin-left:4px;color:var(--muted)">kHz</span></div>
+      </div>
+      <div class="setting-item">
+        <label>V Frequency</label>
+        <div class="val">${t.vFreqHz ? t.vFreqHz.toFixed(2) : '—'}<span style="font-size:12px;margin-left:4px;color:var(--muted)">Hz</span></div>
+      </div>
+      <div class="setting-item">
+        <label>Sync</label>
+        <div class="val"><span class="badge ${t.syncPresent ? 'badge-green' : 'badge-grey'}">${t.syncPresent ? 'Present' : (t.syncPresent===false ? 'None' : '—')}</span></div>
+      </div>
+      <div class="setting-item">
+        <label>Model</label>
+        <div class="val" style="font-size:13px">${esc(model)}</div>
+      </div>
+      <div class="setting-item">
+        <label>Serial</label>
+        <div class="val" style="font-size:13px">${esc(serial)}</div>
+      </div>
+      <div class="setting-item">
+        <label>Firmware</label>
+        <div class="val" style="font-size:13px">${esc(firmware)}</div>
+      </div>
+      <div class="setting-item">
+        <label>MAC Address</label>
+        <div class="val" style="font-size:13px">${esc(mac)}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ─── image controls (sliders) ───────────────────────────────────────────────
+
+function renderImageControls(vcp) {
+  const sliders = [
+    { name:'brightness', label:'Brightness', opPage:0x00, opCode:0x10 },
+    { name:'contrast',   label:'Contrast',   opPage:0x00, opCode:0x12 },
+    { name:'sharpness',  label:'Sharpness',  opPage:0x00, opCode:0x87 },
+    { name:'volume',     label:'Volume',     opPage:0x00, opCode:0x62 },
+    { name:'redGain',    label:'Red Gain',   opPage:0x00, opCode:0x16 },
+    { name:'greenGain',  label:'Green Gain', opPage:0x00, opCode:0x18 },
+    { name:'blueGain',   label:'Blue Gain',  opPage:0x00, opCode:0x1A },
+  ];
+
+  const items = sliders.map(s => {
+    const v   = vcp[s.name];
+    const cur = v?.current ?? 0;
+    const max = v?.max     ?? 100;
+    const err = v?.error;
+    return `
+    <div class="setting-item" id="item-${s.name}">
+      <label>${s.label}</label>
+      ${err ? '<span class="error-text">' + esc(err) + '</span>' : `
+      <div class="val" id="val-${s.name}">${cur}</div>
+      <div class="val-sub">max ${max}</div>
+      <div class="controls">
+        <input type="range" id="range-${s.name}" min="0" max="${max}" value="${cur}"
+          oninput="document.getElementById('val-${s.name}').textContent=this.value"
+          onchange="setVcp(${s.opPage},${s.opCode},+this.value,'val-${s.name}')">
+      </div>`}
+    </div>`;
+  }).join('');
+
+  document.getElementById('card-image').innerHTML = `
+  <div class="card-header"><h2>Image Controls</h2>
+    <button class="btn-secondary" onclick="refreshImageControls()">↻ Refresh</button>
+  </div>
+  <div class="card-body"><div class="settings-grid">${items}</div></div>`;
+}
+
+async function refreshImageControls() {
+  const names = ['brightness','contrast','sharpness','volume','redGain','greenGain','blueGain'];
+  const codes  = {brightness:[0,0x10],contrast:[0,0x12],sharpness:[0,0x87],volume:[0,0x62],redGain:[0,0x16],greenGain:[0,0x18],blueGain:[0,0x1A]};
+  for (const name of names) {
+    try {
+      const [pg, oc] = codes[name];
+      const r = await api('/vcp/get', { opPage: pg, opCode: oc });
+      const rangeEl = document.getElementById('range-' + name);
+      const valEl   = document.getElementById('val-'   + name);
+      if (rangeEl) { rangeEl.value = r.current; rangeEl.max = r.max; }
+      if (valEl)   valEl.textContent = r.current;
+    } catch {}
+  }
+}
+
+async function setVcp(opPage, opCode, value, valId) {
+  try {
+    await api('/vcp/set', { opPage, opCode, value, persist: false });
+    if (valId) document.getElementById(valId).textContent = value;
+  } catch(e) {
+    alert('VCP set failed: ' + e.message);
+  }
+}
+
+// ─── power ──────────────────────────────────────────────────────────────────
+
+function renderPower(power) {
+  document.getElementById('card-power').innerHTML = `
+  <div class="card-header"><h2>Power Control</h2></div>
+  <div class="card-body">
+    <div class="flex-gap">
+      <span id="power-badge" class="badge ${power.modeStr==='on' ? 'badge-green' : 'badge-grey'}">${power.modeStr||'unknown'}</span>
+      <button class="btn-primary"    onclick="setPower('on')">Power ON</button>
+      <button class="btn-warn"       onclick="setPower('off')">Power OFF</button>
+      <button class="btn-secondary"  onclick="refreshPower()">↻ Status</button>
+    </div>
+    <p class="mono" style="color:var(--muted);font-size:10px">⚠ Power on/off enforces a 15-second cooldown after reply.</p>
+  </div>`;
+}
+
+async function refreshPower() {
+  try {
+    const r = await api('/power/status');
+    const modeBadge = {on:'badge-green', standby:'badge-yellow', suspend:'badge-yellow', off:'badge-red'};
+    const el = document.getElementById('power-badge');
+    if (el) { el.className = 'badge ' + (modeBadge[r.modeStr] || 'badge-grey'); el.textContent = r.modeStr; }
+    renderOverview({ power: r, timing: lastData.timing });
+  } catch(e) { alert(e.message); }
+}
+
+async function setPower(state) {
+  if (!confirm('Set power ' + state + '? (15s cooldown will apply)')) return;
+  try {
+    await api('/power/set', { state });
+    setTimeout(refreshPower, 2000);
+  } catch(e) { alert(e.message); }
+}
+
+// ─── custom VCP ─────────────────────────────────────────────────────────────
+
+function renderVcpCustom() {
+  document.getElementById('card-vcp-custom').innerHTML = `
+  <div class="card-header"><h2>Raw VCP Access</h2></div>
+  <div class="card-body">
+    <div class="form-row">
+      <div class="form-group">
+        <label>Op Page (hex)</label>
+        <input type="text" id="vcp-page" value="00" style="width:80px">
+      </div>
+      <div class="form-group">
+        <label>Op Code (hex)</label>
+        <input type="text" id="vcp-code" value="10" style="width:80px">
+      </div>
+      <button class="btn-secondary" onclick="vcpGetCustom()">GET</button>
+    </div>
+    <div id="vcp-get-result" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
+    <hr>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Op Page (hex)</label>
+        <input type="text" id="vcp-set-page" value="00" style="width:80px">
+      </div>
+      <div class="form-group">
+        <label>Op Code (hex)</label>
+        <input type="text" id="vcp-set-code" value="10" style="width:80px">
+      </div>
+      <div class="form-group">
+        <label>Value (decimal)</label>
+        <input type="number" id="vcp-set-value" value="50" style="width:90px">
+      </div>
+      <div class="form-group">
+        <label>Persist</label>
+        <input type="checkbox" id="vcp-set-persist" checked style="margin-top:8px">
+      </div>
+      <button class="btn-primary" onclick="vcpSetCustom()">SET</button>
+    </div>
+    <div id="vcp-set-result" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
+  </div>`;
+}
+
+async function vcpGetCustom() {
+  const opPage = parseInt(document.getElementById('vcp-page').value,  16);
+  const opCode = parseInt(document.getElementById('vcp-code').value,  16);
+  const el = document.getElementById('vcp-get-result');
+  try {
+    const r = await api('/vcp/get', { opPage, opCode });
+    el.innerHTML = '<span class="ok-text">✓</span>  type=' + r.type + '  max=' + r.max + '  current=<strong style="color:var(--accent)">' + r.current + '</strong>';
+  } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+async function vcpSetCustom() {
+  const opPage  = parseInt(document.getElementById('vcp-set-page').value,  16);
+  const opCode  = parseInt(document.getElementById('vcp-set-code').value,  16);
+  const value   = parseInt(document.getElementById('vcp-set-value').value, 10);
+  const persist = document.getElementById('vcp-set-persist').checked;
+  const el = document.getElementById('vcp-set-result');
+  try {
+    const r = await api('/vcp/set', { opPage, opCode, value, persist });
+    el.innerHTML = '<span class="ok-text">✓</span>  requested=' + r.requested + '  max=' + r.max;
+  } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+// ─── timing ─────────────────────────────────────────────────────────────────
+
+function renderTiming(t) {
+  document.getElementById('card-timing').innerHTML = `
+  <div class="card-header"><h2>Timing Report</h2>
+    <button class="btn-secondary" onclick="refreshTiming()">↻ Refresh</button>
+  </div>
+  <div class="card-body" id="timing-body">
+    ${timingHTML(t)}
+  </div>`;
+}
+
+function timingHTML(t) {
+  if (t.error) return '<span class="error-text">' + esc(t.error) + '</span>';
+  return `
+  <div class="settings-grid">
+    <div class="setting-item"><label>H Frequency</label><div class="val">${t.hFreqKHz ? t.hFreqKHz.toFixed(2) : '—'}<span style="font-size:12px;margin-left:4px;color:var(--muted)">kHz</span></div></div>
+    <div class="setting-item"><label>V Frequency</label><div class="val">${t.vFreqHz  ? t.vFreqHz.toFixed(2)  : '—'}<span style="font-size:12px;margin-left:4px;color:var(--muted)">Hz</span></div></div>
+    <div class="setting-item"><label>Sync Present</label><div class="val"><span class="badge ${t.syncPresent ? 'badge-green':'badge-grey'}">${t.syncPresent ? 'Yes':'No'}</span></div></div>
+    <div class="setting-item"><label>Status Bits</label><div class="val mono" style="font-size:14px">0x${(t.statusBits||0).toString(16).toUpperCase().padStart(2,'0')}</div></div>
+  </div>`;
+}
+
+async function refreshTiming() {
+  try { const r = await api('/timing'); document.getElementById('timing-body').innerHTML = timingHTML(r); }
+  catch(e) { document.getElementById('timing-body').innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+// ─── asset ──────────────────────────────────────────────────────────────────
+
+function renderAsset(asset) {
+  document.getElementById('card-asset').innerHTML = `
+  <div class="card-header"><h2>Asset Storage (64 bytes)</h2>
+    <button class="btn-secondary" onclick="readAllAsset()">↻ Read All</button>
+  </div>
+  <div class="card-body">
+    <div id="asset-display" style="font-family:var(--mono);font-size:11px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:10px;white-space:pre-wrap;word-break:break-all">${assetHTML(asset)}</div>
+    <hr>
+    <div class="form-row">
+      <div class="form-group"><label>Offset (0x00 or 0x20)</label>
+        <select id="asset-offset" style="width:90px"><option value="0">0x00</option><option value="32">0x20</option></select>
+      </div>
+      <div class="form-group" style="flex:1"><label>ASCII Text (max 32 chars)</label>
+        <input type="text" id="asset-text" maxlength="32" placeholder="Enter ASCII text">
+      </div>
+      <button class="btn-primary" onclick="writeAsset()">Write</button>
+    </div>
+    <div id="asset-write-result"></div>
+  </div>`;
+}
+
+function assetHTML(asset) {
+  if (asset.error) return '<span class="error-text">' + esc(asset.error) + '</span>';
+  if (!asset.hex)  return '<span style="color:var(--muted)">—</span>';
+  const hex  = asset.hex.match(/.{2}/g) || [];
+  const text = asset.text || '';
+  return '<span style="color:var(--muted)">HEX: </span>' + hex.join(' ') + '\\n<span style="color:var(--muted)">TXT: </span>' + esc(text);
+}
+
+async function readAllAsset() {
+  try {
+    const r = await api('/asset/readall');
+    document.getElementById('asset-display').innerHTML = assetHTML(r);
+  } catch(e) {
+    document.getElementById('asset-display').innerHTML = '<span class="error-text">' + esc(e.message) + '</span>';
+  }
+}
+
+async function writeAsset() {
+  const offset = parseInt(document.getElementById('asset-offset').value, 10);
+  const text   = document.getElementById('asset-text').value;
+  const el     = document.getElementById('asset-write-result');
+  if (!text) { el.innerHTML = '<span class="error-text">Enter text to write</span>'; return; }
+  try {
+    await api('/asset/write', { offset, text });
+    el.innerHTML = '<span class="ok-text">✓ Written — refreshing…</span>';
+    setTimeout(readAllAsset, 500);
+  } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+// ─── datetime ───────────────────────────────────────────────────────────────
+
+const WEEKDAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+
+function renderDateTime(dt) {
+  const err = dt.error;
+  document.getElementById('card-datetime').innerHTML = `
+  <div class="card-header"><h2>Date &amp; Time</h2>
+    <button class="btn-secondary" onclick="refreshDateTime()">↻ Refresh</button>
+  </div>
+  <div class="card-body" id="dt-body">
+    ${err ? '<span class="error-text">' + esc(err) + '</span>' : dtDisplayHTML(dt)}
+    <hr>
+    <p style="font-family:var(--mono);font-size:10px;color:var(--muted)">Write new date/time:</p>
+    <div class="form-row">
+      <div class="form-group"><label>Year (0-99)</label><input type="number" id="dt-year"    min="0" max="99" value="${dt.year??0}" style="width:70px"></div>
+      <div class="form-group"><label>Month</label>      <input type="number" id="dt-month"   min="1" max="12" value="${dt.month??1}" style="width:60px"></div>
+      <div class="form-group"><label>Day</label>        <input type="number" id="dt-day"     min="1" max="31" value="${dt.day??1}"   style="width:60px"></div>
+      <div class="form-group"><label>Weekday (0=Mon)</label><input type="number" id="dt-weekday" min="0" max="6" value="${dt.weekday??0}" style="width:60px"></div>
+      <div class="form-group"><label>Hour</label>       <input type="number" id="dt-hour"    min="0" max="23" value="${dt.hour??0}"  style="width:60px"></div>
+      <div class="form-group"><label>Minute</label>     <input type="number" id="dt-minute"  min="0" max="59" value="${dt.minute??0}" style="width:60px"></div>
+      <div class="form-group"><label>DST</label>        <input type="checkbox" id="dt-dst" ${dt.dst?'checked':''} style="margin-top:8px"></div>
+      <button class="btn-primary" onclick="writeDateTime()">Write</button>
+    </div>
+    <div id="dt-write-result"></div>
+  </div>`;
+}
+
+function dtDisplayHTML(dt) {
+  if (!dt || Object.keys(dt).length === 0) return '<span style="color:var(--muted)">—</span>';
+  const wd = WEEKDAYS[dt.weekday] || '?';
+  return `<div style="font-family:var(--mono);font-size:16px;color:var(--accent)">20${String(dt.year).padStart(2,'0')}-${String(dt.month).padStart(2,'0')}-${String(dt.day).padStart(2,'0')} &nbsp; ${String(dt.hour).padStart(2,'0')}:${String(dt.minute).padStart(2,'0')} &nbsp; ${wd} ${dt.dst?'<span class="badge badge-blue">DST</span>':''}</div>`;
+}
+
+async function refreshDateTime() {
+  try {
+    const r = await api('/datetime/read');
+    const body = document.getElementById('dt-body');
+    if (body) body.querySelector('div')?.remove();
+    renderDateTime(r);
+  } catch(e) { document.getElementById('card-datetime').querySelector('#dt-body').innerHTML += '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+async function writeDateTime() {
+  const dt = {
+    year:    parseInt(document.getElementById('dt-year').value),
+    month:   parseInt(document.getElementById('dt-month').value),
+    day:     parseInt(document.getElementById('dt-day').value),
+    weekday: parseInt(document.getElementById('dt-weekday').value),
+    hour:    parseInt(document.getElementById('dt-hour').value),
+    minute:  parseInt(document.getElementById('dt-minute').value),
+    dst:     document.getElementById('dt-dst').checked,
+  };
+  const el = document.getElementById('dt-write-result');
+  try {
+    await api('/datetime/write', dt);
+    el.innerHTML = '<span class="ok-text">✓ Date/time written</span>';
+    setTimeout(refreshDateTime, 500);
+  } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+// ─── schedule ───────────────────────────────────────────────────────────────
+
+function renderSchedule(slots) {
+  const rows = slots.map((s, i) => {
+    if (!s || s.error) return `<tr><td>${i}</td><td colspan="7" class="error-text">${s?.error || '—'}</td></tr>`;
+    const del = s.hour === 0xFF && s.minute === 0xFF;
+    return `<tr>
+      <td>${i}</td>
+      <td>${del ? '<span class="badge badge-grey">deleted</span>' : s.hour+':'+String(s.minute).padStart(2,'0')}</td>
+      <td>0x${(s.event||0).toString(16).toUpperCase()}</td>
+      <td>0x${(s.input||0).toString(16).toUpperCase()}</td>
+      <td>0x${(s.weekMask||0).toString(16).toUpperCase()}</td>
+      <td>0x${(s.typeMask||0).toString(16).toUpperCase()}</td>
+      <td>0x${(s.pictureMode||0).toString(16).toUpperCase()}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" style="color:var(--muted)">No data</td></tr>';
+
+  document.getElementById('card-schedule').innerHTML = `
+  <div class="card-header"><h2>Schedule Slots</h2></div>
+  <div class="card-body">
+    <div style="overflow-x:auto">
+    <table>
+      <tr><th>#</th><th>Time</th><th>Event</th><th>Input</th><th>WeekMask</th><th>TypeMask</th><th>PicMode</th></tr>
+      ${rows}
+    </table>
+    </div>
+    <hr>
+    <p style="font-family:var(--mono);font-size:10px;color:var(--muted)">Write / delete a schedule slot (set hour=0xFF to delete):</p>
+    <div class="form-row">
+      <div class="form-group"><label>Slot #</label>      <input type="number" id="sch-no"    value="0"    min="0" style="width:60px"></div>
+      <div class="form-group"><label>Event (hex)</label> <input type="text"   id="sch-event" value="01"   style="width:70px"></div>
+      <div class="form-group"><label>Hour (0xFF=del)</label><input type="text" id="sch-hour"  value="08"   style="width:70px"></div>
+      <div class="form-group"><label>Minute</label>      <input type="text"   id="sch-min"   value="00"   style="width:70px"></div>
+      <div class="form-group"><label>Input (hex)</label> <input type="text"   id="sch-input" value="01"   style="width:70px"></div>
+      <div class="form-group"><label>WeekMask (hex)</label><input type="text" id="sch-week"  value="1F"   style="width:70px"></div>
+      <div class="form-group"><label>TypeMask (hex)</label><input type="text" id="sch-type"  value="00"   style="width:70px"></div>
+      <div class="form-group"><label>PicMode (hex)</label><input type="text"  id="sch-pic"   value="00"   style="width:70px"></div>
+      <button class="btn-primary" onclick="writeSchedule()">Write</button>
+    </div>
+    <div id="sch-result"></div>
+  </div>`;
+}
+
+async function writeSchedule() {
+  const entry = {
+    programNo:   parseInt(document.getElementById('sch-no').value),
+    event:       parseInt(document.getElementById('sch-event').value, 16),
+    hour:        parseInt(document.getElementById('sch-hour').value,  16),
+    minute:      parseInt(document.getElementById('sch-min').value,   16),
+    input:       parseInt(document.getElementById('sch-input').value, 16),
+    weekMask:    parseInt(document.getElementById('sch-week').value,  16),
+    typeMask:    parseInt(document.getElementById('sch-type').value,  16),
+    pictureMode: parseInt(document.getElementById('sch-pic').value,   16),
+  };
+  const el = document.getElementById('sch-result');
+  try {
+    const r = await api('/schedule/write', { entry });
+    el.innerHTML = '<span class="ok-text">✓ Written — result=' + r.result + '</span>';
+  } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+// ─── holiday ─────────────────────────────────────────────────────────────────
+
+function renderHoliday(slots) {
+  const rows = slots.map((h, i) => {
+    if (!h || h.error) return `<tr><td>${i}</td><td colspan="4" class="error-text">${h?.error||'—'}</td></tr>`;
+    return `<tr>
+      <td>${i}</td>
+      <td>0x${(h.type||0).toString(16).toUpperCase()}</td>
+      <td>${h.endDay ?? '—'}</td>
+      <td>${h.weekNo ?? '—'}</td>
+      <td>${h.mode}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="5" style="color:var(--muted)">No data</td></tr>';
+
+  document.getElementById('card-holiday').innerHTML = `
+  <div class="card-header"><h2>Holiday Slots</h2></div>
+  <div class="card-body">
+    <div style="overflow-x:auto">
+    <table><tr><th>#</th><th>Type</th><th>End Day</th><th>Week #</th><th>Mode</th></tr>${rows}</table>
+    </div>
+    <hr>
+    <div class="form-row">
+      <div class="form-group"><label>Slot #</label>       <input type="number" id="hol-no"    value="0"  min="0" style="width:60px"></div>
+      <div class="form-group"><label>Type (hex)</label>   <input type="text"   id="hol-type"  value="01" style="width:70px"></div>
+      <div class="form-group"><label>End Day</label>      <input type="number" id="hol-endday" value="0" style="width:60px"></div>
+      <div class="form-group"><label>Week #</label>       <input type="number" id="hol-weekno" value="0" style="width:60px"></div>
+      <button class="btn-primary" onclick="writeHoliday()">Write</button>
+    </div>
+    <div id="hol-result"></div>
+  </div>`;
+}
+
+async function writeHoliday() {
+  const entry = {
+    programNo: parseInt(document.getElementById('hol-no').value),
+    type:      parseInt(document.getElementById('hol-type').value,   16),
+    endDay:    parseInt(document.getElementById('hol-endday').value, 10),
+    weekNo:    parseInt(document.getElementById('hol-weekno').value, 10),
+  };
+  const el = document.getElementById('hol-result');
+  try {
+    const r = await api('/holiday/write', { entry });
+    el.innerHTML = '<span class="ok-text">✓ Written</span>';
+  } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+// ─── weekend ─────────────────────────────────────────────────────────────────
+
+function renderWeekend(w) {
+  const dayNames = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const mask = w.weekMask ?? 0;
+  const checks = dayNames.map((d, i) => `
+    <label style="display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:11px;cursor:pointer">
+      <input type="checkbox" id="wknd-${i}" ${mask & (1<<i) ? 'checked' : ''}> ${d}
+    </label>`).join('');
+
+  document.getElementById('card-weekend').innerHTML = `
+  <div class="card-header"><h2>Weekend Mask</h2>
+    <button class="btn-secondary" onclick="refreshWeekend()">↻ Refresh</button>
+  </div>
+  <div class="card-body">
+    <div class="flex-gap" id="wknd-checks">${checks}</div>
+    <div class="flex-gap" style="margin-top:8px">
+      <button class="btn-primary" onclick="writeWeekend()">Write Weekend Mask</button>
+      <span id="wknd-result"></span>
+    </div>
+  </div>`;
+}
+
+async function refreshWeekend() {
+  try { const r = await api('/weekend/read'); renderWeekend(r); }
+  catch(e) { alert(e.message); }
+}
+
+async function writeWeekend() {
+  let mask = 0;
+  for (let i = 0; i < 7; i++) {
+    if (document.getElementById('wknd-' + i)?.checked) mask |= (1 << i);
+  }
+  const el = document.getElementById('wknd-result');
+  try {
+    await api('/weekend/write', { weekMask: mask });
+    el.innerHTML = '<span class="ok-text">✓ Written (mask=0x' + mask.toString(16).toUpperCase() + ')</span>';
+  } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+
+
+// ─── input switching ──────────────────────────────────────────────────────────
+
+const INPUT_OPTIONS = [
+  { value: 0x0F, label: 'DisplayPort 1' },
+  { value: 0x10, label: 'DisplayPort 2' },
+  { value: 0x11, label: 'HDMI 1' },
+  { value: 0x12, label: 'HDMI 2' },
+  { value: 0x82, label: 'HDMI 3' },
+  { value: 0x87, label: 'Media Player' },
+  { value: 0x88, label: 'Compute Module' },
+  { value: 0x01, label: 'VGA (RGB)' },
+  { value: 0x03, label: 'DVI' },
+  { value: 0x05, label: 'Video' },
+  { value: 0x0C, label: 'YPbPr' },
+  { value: 0x0D, label: 'Option' },
+];
+
+function inputLabel(val) {
+  return INPUT_OPTIONS.find(o => o.value === val)?.label ?? ('0x' + (val ?? 0).toString(16).toUpperCase());
+}
+
+function renderInput(inputSource) {
+  const current = inputSource?.current ?? null;
+  const buttons = INPUT_OPTIONS.map(o => {
+    const active = (o.value === current);
+    return '<button class="' + (active ? 'btn-primary' : 'btn-secondary') + '" '
+      + 'onclick="setInput(' + o.value + ')" '
+      + (active ? 'disabled ' : '')
+      + 'style="min-width:140px">'
+      + (active ? '● ' : '') + esc(o.label) + '</button>';
+  }).join('\n      ');
+
+  document.getElementById('card-input').innerHTML = `
+  <div class="card-header"><h2>Input Source</h2>
+    <button class="btn-secondary" onclick="refreshInput()">↻ Refresh</button>
+  </div>
+  <div class="card-body">
+    <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:10px">
+      Active: <span style="color:var(--accent)">${current !== null ? esc(inputLabel(current)) : '—'}</span>
+      ${current !== null ? '(0x' + current.toString(16).toUpperCase() + ')' : ''}
+    </div>
+    <div class="flex-gap" style="flex-wrap:wrap">
+      ${buttons}
+    </div>
+    <div id="input-result" style="margin-top:8px"></div>
+  </div>`;
+}
+
+async function refreshInput() {
+  try {
+    const r = await api('/vcp/get', { opPage: 0x00, opCode: 0x60 });
+    renderInput({ current: r.current });
+  } catch(e) { alert('Input refresh failed: ' + e.message); }
+}
+
+async function setInput(value) {
+  const el = document.getElementById('input-result');
+  try {
+    await api('/vcp/set', { opPage: 0x00, opCode: 0x60, value, persist: true });
+    el.innerHTML = '<span class="ok-text">✓ Input switched — refreshing…</span>';
+    setTimeout(async () => {
+      try { await refreshInput(); el.innerHTML = ''; } catch {}
+    }, 1500);
+  } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+// ─── diagnostics (self-diag, temperature, ambient light, power mode) ──────────
+
+const POWER_MODE_LABELS = { 1:'On', 2:'Standby', 3:'Suspend', 4:'Off', 5:'Hard Off' };
+
+function renderDiag(selfDiag, tempSensor, ambientLight, powerMode) {
+  // Self-diagnosis
+  let diagHtml = '';
+  if (!selfDiag || selfDiag.error) {
+    diagHtml = '<span class="error-text">' + esc(selfDiag?.error ?? 'No data') + '</span>';
+  } else if (selfDiag.normal) {
+    diagHtml = '<span class="ok-text">✓ All systems normal</span>';
+  } else {
+    diagHtml = selfDiag.codes
+      .filter(c => c.code !== 0x00)
+      .map(c => '<div style="color:var(--danger);font-family:var(--mono);font-size:11px">⚠ 0x'
+        + c.code.toString(16).toUpperCase() + ' — ' + esc(c.description) + '</div>')
+      .join('');
+  }
+
+  // Temperature (2's complement, 0.5°C per step)
+  let tempHtml = '—';
+  if (tempSensor && !tempSensor.error && tempSensor.current != null) {
+    const raw = tempSensor.current;
+    const signed = raw > 0x7FFF ? raw - 0x10000 : raw;
+    const celsius = (signed * 0.5).toFixed(1);
+    const color = signed > 70 ? 'var(--danger)' : signed > 55 ? 'var(--warn)' : 'var(--accent)';
+    tempHtml = '<span style="color:' + color + '">' + celsius + ' °C</span>';
+  }
+
+  // Ambient light
+  let luxHtml = '—';
+  if (ambientLight && !ambientLight.error && ambientLight.current != null) {
+    luxHtml = '<span style="color:var(--text)">' + ambientLight.current + ' lux</span>';
+  }
+
+  // Power mode
+  let pmHtml = '—';
+  if (powerMode && !powerMode.error && powerMode.current != null) {
+    const pm = powerMode.current;
+    const pmColor = pm === 1 ? 'var(--accent)' : (pm <= 3 ? 'var(--warn)' : 'var(--muted)');
+    pmHtml = '<span style="color:' + pmColor + '">' + (POWER_MODE_LABELS[pm] ?? '0x' + pm.toString(16)) + '</span>';
+  }
+
+  document.getElementById('card-diag').innerHTML = `
+  <div class="card-header"><h2>Diagnostics</h2>
+    <button class="btn-secondary" onclick="refreshDiag()">↻ Refresh</button>
+  </div>
+  <div class="card-body">
+    <div class="settings-grid" style="margin-bottom:12px">
+      <div class="setting-item"><label>Power Mode</label><div class="val">${pmHtml}</div></div>
+      <div class="setting-item"><label>Temperature</label><div class="val">${tempHtml}</div></div>
+      <div class="setting-item"><label>Ambient Light</label><div class="val">${luxHtml}</div></div>
+    </div>
+    <div style="font-family:var(--mono);font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Self-Diagnosis</div>
+    <div id="diag-body">${diagHtml}</div>
+  </div>`;
+}
+
+async function refreshDiag() {
+  try {
+    const [diag, temp, lux, pm] = await Promise.allSettled([
+      api('/self-diagnosis'),
+      api('/vcp/get', { opPage: 0x02, opCode: 0x79 }),
+      api('/vcp/get', { opPage: 0x02, opCode: 0xB4 }),
+      api('/vcp/get', { opPage: 0x00, opCode: 0xD6 }),
+    ]);
+    renderDiag(
+      diag.status === 'fulfilled' ? diag.value : { error: diag.reason?.message },
+      temp.status === 'fulfilled' ? temp.value : null,
+      lux.status  === 'fulfilled' ? lux.value  : null,
+      pm.status   === 'fulfilled' ? pm.value   : null,
+    );
+  } catch(e) { alert('Diagnostics refresh failed: ' + e.message); }
+}
+
+// ─── subnet scanner ───────────────────────────────────────────────────────────
+
+function renderScanner() {
+  document.getElementById('card-scanner').innerHTML = `
+  <div class="card-header"><h2>Network Scanner</h2></div>
+  <div class="card-body">
+    <p style="font-size:11px;color:var(--muted);margin:0 0 10px">
+      Scans a /24 subnet for NEC monitors responding on port 7142.
+      Set <code style="color:var(--accent)">NEC_SUBNET=192.168.1</code> env var to pre-fill, or type below.
+    </p>
+    <div class="flex-gap" style="align-items:center;margin-bottom:10px">
+      <input type="text" id="scan-subnet" placeholder="192.168.1"
+        style="width:140px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:3px;font-family:var(--mono);font-size:12px">
+      <span style="font-size:11px;color:var(--muted)">port</span>
+      <input type="number" id="scan-port" value="7142" min="1" max="65535"
+        style="width:70px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:3px;font-family:var(--mono);font-size:12px">
+      <button class="btn-primary" onclick="startScan()">Scan</button>
+      <span id="scan-status" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></span>
+    </div>
+    <div id="scan-results"></div>
+  </div>`;
+
+  // Pre-fill from server (NEC_SUBNET env var takes priority, then detected interface)
+  fetch('/api/subnets').then(r => r.json()).then(data => {
+    const el = document.getElementById('scan-subnet');
+    if (el && data.subnets?.[0]) el.value = data.subnets[0];
+  }).catch(() => {});
+}
+
+async function startScan() {
+  const selEl    = document.getElementById('scan-subnet');
+  const custom   = document.getElementById('scan-custom')?.value?.trim();
+  const portEl   = document.getElementById('scan-port');
+  const statusEl = document.getElementById('scan-status');
+  const resEl    = document.getElementById('scan-results');
+  const subnet   = custom || selEl?.value;
+  const port     = parseInt(portEl?.value ?? '7142', 10);
+
+  if (!subnet) { alert('Enter a subnet (e.g. 192.168.1)'); return; }
+  statusEl.textContent = 'Scanning…';
+  resEl.innerHTML = '<span style="color:var(--muted);font-family:var(--mono);font-size:11px">Probing 254 hosts — this takes a few seconds…</span>';
+
+  try {
+    const { results } = await api('/scan', { subnet, port });
+    statusEl.textContent = results.length + ' host(s) found';
+    if (results.length === 0) {
+      resEl.innerHTML = '<span style="color:var(--muted);font-family:var(--mono);font-size:11px">No NEC monitors found on ' + esc(subnet) + '.x:' + port + '</span>';
+      return;
+    }
+    resEl.innerHTML = '<div class="flex-gap" style="flex-wrap:wrap">'
+      + results.map(r => {
+          const pw = r.power;
+          const isOn = pw === 1 || pw === 'on';
+          const isOff = pw === 4 || pw === 5 || pw === 'off';
+          const btnClass = isOn ? 'btn-primary' : isOff ? 'btn-secondary' : 'btn-secondary';
+          const dot = isOn ? '<span style="color:var(--accent)">●</span> '
+                    : isOff ? '<span style="color:var(--muted)">○</span> '
+                    : '<span style="color:var(--warn)">◌</span> ';
+          const pwLabel = typeof pw === 'number' ? ({ 1:'On',2:'Standby',3:'Suspend',4:'Off',5:'Hard Off' }[pw] ?? '?') : (pw ?? '?');
+          return '<button class="' + btnClass + '" onclick="connectTo(\'' + r.host + '\',' + r.port + ')" '
+            + 'style="min-width:200px;text-align:left">'
+            + dot + esc(r.host) + ' <span style="opacity:.6;font-size:10px">(' + pwLabel + ')</span></button>';
+        }).join('\n')
+      + '</div>';
+  } catch(e) {
+    statusEl.textContent = 'Error';
+    resEl.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>';
+  }
+}
+
+function connectTo(host, port) {
+  const hostEl = document.getElementById('inp-host');
+  const portEl = document.getElementById('inp-port');
+  if (hostEl) hostEl.value = host;
+  if (portEl) portEl.value = port;
+  connect();
+}
+
+
+// ─── emergency contents ───────────────────────────────────────────────────────
+
+function renderEmergency() {
+  document.getElementById('card-emergency').innerHTML = `
+  <div class="card-header"><h2>⚠ Emergency Contents</h2></div>
+  <div class="card-body">
+    <p style="font-size:11px;color:var(--muted);margin:0 0 12px">
+      Plays files from the <code>EMERGENCY CONTENTS</code> folder on SD card via Media Player.
+      Activate saves the current input and switches back on stop.
+      During playback all monitor controls are locked except power off.
+    </p>
+    <div class="flex-gap">
+      <button class="btn-danger" onclick="doEmergencyDisplay()">▶ Activate Emergency Mode</button>
+      <button class="btn-secondary" onclick="doEmergencyStop()">■ Stop / Restore Input</button>
+      <span id="emrg-result"></span>
+    </div>
+  </div>`;
+}
+
+async function doEmergencyDisplay() {
+  const el = document.getElementById('emrg-result');
+  el.innerHTML = '<span style="color:var(--muted)">Saving input and activating…</span>';
+  try {
+    const r = await api('/emergency/display');
+    const savedStr = r.savedInput != null
+      ? ` (saved input 0x${r.savedInput.toString(16)})`
+      : '';
+    el.innerHTML = r.ok
+      ? `<span class="ok-text">✓ Emergency mode active${savedStr}</span>`
+      : `<span class="error-text">Monitor reported error (status=${r.status})</span>`;
+  } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+async function doEmergencyStop() {
+  const el = document.getElementById('emrg-result');
+  el.innerHTML = '<span style="color:var(--muted)">Stopping…</span>';
+  try {
+    const r = await api('/emergency/stop');
+    const methodStr = r.method === 'input-restore'
+      ? `restored input 0x${r.restoredInput.toString(16)}`
+      : 'formal stop command sent';
+    el.innerHTML = r.ok
+      ? `<span class="ok-text">✓ Stopped — ${methodStr}</span>`
+      : `<span class="error-text">Monitor reported error</span>`;
+  } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+
+// ─── media player folder control ─────────────────────────────────────────────
+
+const PLAYER_FOLDERS = ['folder1','folder2','folder3','folder4','all'];
+
+function renderPlayer() {
+  const tvIP = document.getElementById('inp-host')?.value?.trim() || '';
+  const folderBtns = PLAYER_FOLDERS.map(f => `
+    <button class="btn-secondary" onclick="doPlayFolder('${f}')"
+      id="player-btn-${f}" style="min-width:80px">▶ ${f}</button>
+  `).join('');
+
+  document.getElementById('card-player').innerHTML = `
+  <div class="card-header"><h2>▶ Media Player</h2>
+    <button class="btn-secondary" onclick="refreshPlayerFolder()">↻ Current</button>
+  </div>
+  <div class="card-body">
+    <p style="font-size:11px;color:var(--muted);margin:0 0 12px">
+      Sets autoplay folder on the media player, restarts it, and switches the TV input to MP.
+      Stop restores the previous input. Input is bounced automatically if already on MP.
+    </p>
+    <div style="margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span style="font-size:11px;color:var(--muted)">TV IP:</span>
+      <input type="text" id="player-tv-ip" value="${esc(tvIP)}"
+        placeholder="192.168.x.x"
+        style="width:140px;background:var(--bg);border:1px solid var(--border);color:var(--text);
+               padding:4px 8px;border-radius:3px;font-family:var(--mono);font-size:12px">
+      <span style="font-size:11px;color:var(--muted)">Restore to:</span>
+      <select id="player-restore-input"
+        style="background:var(--bg);border:1px solid var(--border);color:var(--text);
+               padding:4px 8px;border-radius:3px;font-family:var(--mono);font-size:12px">
+        <option value="17">HDMI1</option>
+        <option value="18">HDMI2</option>
+        <option value="15">DisplayPort1</option>
+        <option value="16">DisplayPort2</option>
+      </select>
+    </div>
+    <div style="margin-bottom:10px;font-family:var(--mono);font-size:11px;color:var(--muted)">
+      Active folder: <span id="player-current-folder">unknown — click ↻</span>
+    </div>
+    <div class="flex-gap" style="flex-wrap:wrap">
+      ${folderBtns}
+      <button class="btn-warn" onclick="doPlayerStop()" id="player-btn-stop">■ Stop / Restore</button>
+    </div>
+    <div style="margin-top:10px" id="player-result"></div>
+  </div>`;
+}
+
+async function refreshPlayerFolder() {
+  const tvIP = document.getElementById('player-tv-ip')?.value?.trim();
+  if (!tvIP) { alert('Enter a TV IP'); return; }
+  const el = document.getElementById('player-current-folder');
+  el.textContent = 'reading…';
+  try {
+    const r = await api('/player/folder', { tvIP });
+    el.textContent = r.folder ?? 'unknown';
+  } catch(e) { el.textContent = 'error: ' + e.message; }
+}
+
+async function doPlayFolder(folder) {
+  const tvIP        = document.getElementById('player-tv-ip')?.value?.trim();
+  const restoreInput = parseInt(document.getElementById('player-restore-input')?.value ?? '17', 10);
+  const resultEl    = document.getElementById('player-result');
+  if (!tvIP) { alert('Enter a TV IP first'); return; }
+
+  // Highlight active button
+  PLAYER_FOLDERS.forEach(f => {
+    const b = document.getElementById(`player-btn-${f}`);
+    if (b) b.className = f === folder ? 'btn-primary' : 'btn-secondary';
+  });
+
+  resultEl.innerHTML = `<span style="color:var(--muted)">Switching to ${folder}…</span>`;
+  try {
+    const r = await api('/player/play', { tvIP, folder, restoreInput });
+    document.getElementById('player-current-folder').textContent = r.folder ?? folder;
+    resultEl.innerHTML = r.ok
+      ? `<span class="ok-text">✓ Now playing: ${esc(r.folder)}</span>`
+      : `<span class="error-text">Error: ${esc(JSON.stringify(r))}</span>`;
+  } catch(e) {
+    resultEl.innerHTML = `<span class="error-text">${esc(e.message)}</span>`;
+  }
+}
+
+async function doPlayerStop() {
+  const tvIP         = document.getElementById('player-tv-ip')?.value?.trim();
+  const restoreInput = parseInt(document.getElementById('player-restore-input')?.value ?? '17', 10);
+  const resultEl     = document.getElementById('player-result');
+  if (!tvIP) { alert('Enter a TV IP first'); return; }
+
+  PLAYER_FOLDERS.forEach(f => {
+    const b = document.getElementById(`player-btn-${f}`);
+    if (b) b.className = 'btn-secondary';
+  });
+
+  resultEl.innerHTML = `<span style="color:var(--muted)">Stopping…</span>`;
+  try {
+    const r = await api('/player/stop', { tvIP, restoreInput });
+    resultEl.innerHTML = r.ok
+      ? `<span class="ok-text">✓ Stopped — input restored to 0x${restoreInput.toString(16)}</span>`
+      : `<span class="error-text">Error: ${esc(JSON.stringify(r))}</span>`;
+  } catch(e) {
+    resultEl.innerHTML = `<span class="error-text">${esc(e.message)}</span>`;
+  }
+}
+
+// ─── information osd ──────────────────────────────────────────────────────────
+// VCP page 0x02, code 0x3D
+// 0 = disable OSD overlay, 3–10 = display duration in seconds
+
+function renderOsd(infoOsd) {
+  const current    = infoOsd && infoOsd.current != null ? infoOsd.current : null;
+  const isDisabled = current === 0;
+  const timerVal   = (current !== null && current > 0) ? current : 5;
+  const stateHtml  = current === null
+    ? '<span style="color:var(--muted)">unknown — click Refresh</span>'
+    : isDisabled
+      ? '<span style="color:var(--warn)">Disabled</span>'
+      : '<span style="color:var(--accent)">Enabled (' + current + 's)</span>';
+
+  document.getElementById('card-osd').innerHTML = `
+  <div class="card-header"><h2>Information OSD</h2>
+    <button class="btn-secondary" onclick="refreshOsd()">↻ Refresh</button>
+  </div>
+  <div class="card-body">
+    <p style="font-size:11px;color:var(--muted);margin:0 0 10px">
+      Controls the on-screen overlay shown when switching inputs (source name, IP address, etc.).
+      Disable for everyday use; enable temporarily for diagnostics.
+    </p>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:10px">
+      Current state: ${stateHtml}
+    </div>
+    <div class="flex-gap" style="align-items:center">
+      <button class="btn-danger" onclick="setOsd(0)">✕ Disable OSD</button>
+      <button class="btn-primary" onclick="setOsdTimer()">✓ Enable</button>
+      <input type="number" id="osd-timer" value="${timerVal}" min="3" max="10"
+             style="width:52px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 6px;border-radius:3px;font-family:var(--mono);font-size:12px">
+      <span style="font-size:11px;color:var(--muted)">seconds (3–10)</span>
+      <span id="osd-result"></span>
+    </div>
+  </div>`;
+}
+
+async function refreshOsd() {
+  try {
+    const r = await api('/vcp/get', { opPage: 0x02, opCode: 0x3D });
+    renderOsd({ current: r.current, max: r.max });
+  } catch(e) { alert('OSD refresh failed: ' + e.message); }
+}
+
+async function setOsd(value) {
+  const el = document.getElementById('osd-result');
+  try {
+    await api('/vcp/set', { opPage: 0x02, opCode: 0x3D, value, persist: true });
+    el.innerHTML = value === 0
+      ? '<span class="ok-text">✓ OSD disabled</span>'
+      : '<span class="ok-text">✓ OSD set to ' + value + 's</span>';
+    await refreshOsd();
+  } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
+}
+
+async function setOsdTimer() {
+  const secs = parseInt(document.getElementById('osd-timer')?.value ?? '5', 10);
+  if (secs < 3 || secs > 10) { alert('Timer must be 3–10 seconds'); return; }
+  await setOsd(secs);
+}
+
+// ─── emergency file upload ────────────────────────────────────────────────────
+
+function renderUpload() {
+  // Pre-populate TV IP from current session if connected
+  const currentHost = document.getElementById('inp-host')?.value?.trim() || '';
+  document.getElementById('card-upload').innerHTML = `
+  <div class="card-header"><h2>Emergency Content Upload</h2></div>
+  <div class="card-body">
+    <p style="font-size:11px;color:var(--muted);margin:0 0 12px">
+      Wipes the SD card, creates an <code style="color:var(--accent)">EMERGENCY CONTENTS</code>
+      folder, and uploads the selected file. TV will be powered on automatically if off.
+    </p>
+    <div class="settings-grid" style="margin-bottom:12px">
+      <div class="setting-item">
+        <label>TV IP</label>
+        <input type="text" id="upload-tv-ip" value="${esc(currentHost)}" placeholder="192.168.1.x"
+          style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);
+                 padding:5px 8px;border-radius:3px;font-family:var(--mono);font-size:12px">
+      </div>
+      <div class="setting-item">
+        <label>Files <span style="color:var(--muted);font-size:10px">(video or image, multiple OK — slideshow order = selection order)</span></label>
+        <input type="file" id="upload-file" accept="video/*,image/jpeg,image/png" multiple
+          style="color:var(--text);font-size:12px">
+      </div>
+    </div>
+    <div class="flex-gap" style="align-items:center">
+      <button class="btn-primary" onclick="startUpload()">⬆ Upload</button>
+      <div id="upload-progress" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
+    </div>
+    <div id="upload-result" style="margin-top:10px;font-family:var(--mono);font-size:11px"></div>
+  </div>`;
+}
+
+async function startUpload() {
+  const tvIP   = document.getElementById('upload-tv-ip')?.value?.trim();
+  const fileEl = document.getElementById('upload-file');
+  const progEl = document.getElementById('upload-progress');
+  const resEl  = document.getElementById('upload-result');
+  const files  = fileEl?.files;
+
+  if (!tvIP)             { resEl.innerHTML = '<span class="error-text">Enter a TV IP address</span>'; return; }
+  if (!files?.length)    { resEl.innerHTML = '<span class="error-text">Select at least one file</span>'; return; }
+
+  resEl.innerHTML = '';
+  progEl.textContent = `Reading ${files.length} file(s)…`;
+  document.querySelector('#card-upload .btn-primary').disabled = true;
+
+  try {
+    // Use native FormData — browser handles boundary/encoding; do NOT set Content-Type.
+    const formData = new FormData();
+    for (const file of files) formData.append('file', file, file.name);
+
+    const names = Array.from(files).map(f => f.name).join(', ');
+    progEl.textContent = `Uploading ${files.length} file(s): ${names} — powering on TV if needed, please wait…`;
+
+    const params = new URLSearchParams({ tvIP });
+    const resp = await fetch('/api/emergency-upload?' + params.toString(), {
+      method: 'POST',
+      body: formData,
+    });
+    const json = await resp.json();
+    if (json.error) throw new Error(json.error);
+
+    progEl.textContent = '';
+    const fileList = json.files.map((f, i) =>
+      `  ${i+1}. ${esc(f.filename)} (${f.bytes} bytes)`
+    ).join('<br>');
+    resEl.innerHTML = `<span class="ok-text">✓ ${json.files.length} file(s) uploaded<br>` +
+      `TV: ${esc(json.tvIP)}  Player: ${esc(json.playerIP)}<br>` +
+      `Folder: ${esc(json.folder)}<br>${fileList}</span>`;
+  } catch (e) {
+    progEl.textContent = '';
+    resEl.innerHTML = '<span class="error-text">✗ ' + esc(e.message) + '</span>';
+  } finally {
+    document.querySelector('#card-upload .btn-primary').disabled = false;
+  }
+}
+
+// ─── asset cache ─────────────────────────────────────────────────────────────
+
+async function loadCache() {
+  const el = document.getElementById('card-cache');
+  if (!el) return;
+  el.innerHTML = `
+  <div class="card-header">
+    <h2>Asset Cache</h2>
+    <div class="flex-gap">
+      <button class="btn-secondary" onclick="loadCache()">↺ Refresh</button>
+      <label class="btn-secondary" style="cursor:pointer">
+        ＋ Store File(s)
+        <input type="file" id="cache-file-input" accept="video/*,image/jpeg,image/png"
+          multiple style="display:none" onchange="storeToCache(this)">
+      </label>
+    </div>
+  </div>
+  <div class="card-body" id="cache-body">
+    <span style="color:var(--muted);font-size:12px">Loading…</span>
+  </div>`;
+
+  try {
+    const { items } = await api('/cache', null, 'GET');
+    const bodyEl = document.getElementById('cache-body');
+    if (!items.length) {
+      bodyEl.innerHTML = '<span style="color:var(--muted);font-size:12px">No cached assets yet.</span>';
+      return;
+    }
+    bodyEl.innerHTML = items.map(item => `
+    <div class="cache-item" style="display:flex;align-items:center;gap:10px;padding:6px 0;
+         border-bottom:1px solid var(--border);font-size:12px">
+      <div style="flex:1;min-width:0">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--text);
+             white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
+             title="${esc(item.displayName)}">${esc(item.displayName)}</div>
+        <div style="color:var(--muted);font-size:10px;margin-top:2px">
+          ${esc(item.originalName)} · ${(item.size/1024).toFixed(1)} KB ·
+          ${new Date(item.cachedAt).toLocaleString()}
+          ${item.sentTo.length ? ` · sent to ${item.sentTo.length} TV(s)` : ''}
+        </div>
+      </div>
+      <div class="flex-gap" style="flex-shrink:0">
+        <button class="btn-primary" style="font-size:11px;padding:3px 8px"
+          onclick="sendCachedAsset('${esc(item.sha256)}', '${esc(item.displayName)}')">
+          ⬆ Send to TV
+        </button>
+        <button class="btn-secondary" style="font-size:11px;padding:3px 8px;color:var(--error,#e06)"
+          onclick="deleteCachedAsset('${esc(item.sha256)}')">✕</button>
+      </div>
+    </div>`).join('');
+  } catch(e) {
+    const bodyEl = document.getElementById('cache-body');
+    if (bodyEl) bodyEl.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>';
+  }
+}
+
+async function storeToCache(input) {
+  const files = input.files;
+  if (!files.length) return;
+  const bodyEl = document.getElementById('cache-body');
+  if (bodyEl) bodyEl.innerHTML = `<span style="color:var(--muted);font-size:12px">Storing ${files.length} file(s)…</span>`;
+
+  const formData = new FormData();
+  for (const file of files) formData.append('file', file, file.name);
+
+  try {
+    const resp = await fetch('/api/cache/store', { method: 'POST', body: formData });
+    const json = await resp.json();
+    if (json.error) throw new Error(json.error);
+    input.value = '';
+    await loadCache();
+  } catch(e) {
+    if (bodyEl) bodyEl.innerHTML = '<span class="error-text">✗ ' + esc(e.message) + '</span>';
+  }
+}
+
+async function sendCachedAsset(hash, displayName) {
+  const tvIP = prompt(`Send "${displayName}" to TV IP:`);
+  if (!tvIP) return;
+  const bodyEl = document.getElementById('cache-body');
+  // Show status inline
+  const statusId = 'cache-send-' + hash.slice(0, 8);
+  const row = document.querySelector(`[onclick*="${hash.slice(0,16)}"]`)?.closest('.cache-item');
+  const statusSpan = row
+    ? (row.querySelector('.cache-send-status') ||
+       (() => { const s = document.createElement('span');
+                s.className='cache-send-status';
+                s.style.cssText='font-size:10px;color:var(--muted)';
+                row.appendChild(s); return s; })())
+    : null;
+  if (statusSpan) statusSpan.textContent = ' Sending…';
+
+  try {
+    const r = await api('/cache/send', { hash, tvIP });
+    if (r.error) throw new Error(r.error);
+    if (statusSpan) statusSpan.innerHTML = ' <span class="ok-text">✓ sent</span>';
+    await loadCache(); // refresh sentTo count
+  } catch(e) {
+    if (statusSpan) statusSpan.innerHTML = ' <span class="error-text">✗ ' + esc(e.message) + '</span>';
+    else alert('Error: ' + e.message);
+  }
+}
+
+async function deleteCachedAsset(hash) {
+  if (!confirm('Remove this asset from cache?')) return;
+  try {
+    const r = await fetch('/api/cache/' + hash, { method: 'DELETE' });
+    const json = await r.json();
+    if (json.error) throw new Error(json.error);
+    await loadCache();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ─── util ────────────────────────────────────────────────────────────────────
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Initialise on DOM ready
+document.addEventListener('DOMContentLoaded', () => {
+  renderScanner();
+  // Initialise cache card - independent of TV session
+  const cacheDiv = document.createElement('div');
+  cacheDiv.className = 'card';
+  cacheDiv.id = 'card-cache';
+  document.getElementById('scanner-wrap').appendChild(cacheDiv);
+  loadCache();
+});
+</script>
+</body>
