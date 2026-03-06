@@ -943,20 +943,30 @@ function renderPlayer() {
         placeholder="192.168.x.x"
         style="width:140px;background:var(--bg);border:1px solid var(--border);color:var(--text);
                padding:4px 8px;border-radius:3px;font-family:var(--mono);font-size:12px">
-      <span style="font-size:11px;color:var(--muted)">Restore to:</span>
-      <select id="player-restore-input"
-        style="background:var(--bg);border:1px solid var(--border);color:var(--text);
-               padding:4px 8px;border-radius:3px;font-family:var(--mono);font-size:12px">
-        <option value="17">HDMI1</option>
-        <option value="18">HDMI2</option>
-        <option value="15">DisplayPort1</option>
-        <option value="16">DisplayPort2</option>
-      </select>
-      <span style="font-size:11px;color:var(--muted)">Slide duration:</span>
-      <input type="number" id="player-interval" value="30" min="5" max="99999"
-        style="width:65px;background:var(--bg);border:1px solid var(--border);color:var(--text);
-               padding:4px 8px;border-radius:3px;font-family:var(--mono);font-size:12px">
-      <span style="font-size:11px;color:var(--muted)">s &nbsp;(single-file folders use ∞)</span>
+      <button class="btn-secondary" style="font-size:10px;padding:2px 8px;color:var(--accent2)"
+        onclick="document.getElementById('player-adv').style.display = document.getElementById('player-adv').style.display === 'none' ? 'block' : 'none'">
+        ⚙ Advanced
+      </button>
+    </div>
+    <div id="player-adv" style="display:none;margin-bottom:10px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:3px">
+      <div style="margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:10px;color:var(--muted)">Restore to:</span>
+        <select id="player-restore-input"
+          style="background:var(--bg);border:1px solid var(--border);color:var(--text);
+                 padding:4px 6px;border-radius:3px;font-family:var(--mono);font-size:11px">
+          <option value="17">HDMI1</option>
+          <option value="18">HDMI2</option>
+          <option value="15">DisplayPort1</option>
+          <option value="16">DisplayPort2</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:10px;color:var(--muted)">Slide interval:</span>
+        <input type="number" id="player-interval" value="30" min="5" max="99999"
+          style="width:60px;background:var(--bg);border:1px solid var(--border);color:var(--text);
+                 padding:4px 6px;border-radius:3px;font-family:var(--mono);font-size:11px">
+        <span style="font-size:10px;color:var(--muted)">sec (∞ for single-file)</span>
+      </div>
     </div>
     <div style="margin-bottom:10px;font-family:var(--mono);font-size:11px;color:var(--muted)">
       Active folder: <span id="player-current-folder">unknown — click ↻</span>
@@ -1519,7 +1529,8 @@ function renderAmDevices(body) {
           const cls  = gid === 'all' ? 'badge-grey' : 'badge-blue';
           return `<span class="badge ${cls}" style="cursor:default">
             <span onclick="amPlayGroup('${dev.tvIp}','${gid}','${macId}','${dev.mac}')"
-              style="cursor:pointer" title="▶ Play ${esc(name)} now">
+              style="cursor:pointer;display:flex;align-items:center;gap:3px" title="▶ Play ${esc(name)} now">
+              <span style="font-size:9px">▶</span>
               ${esc(name)}
             </span>
             <button onclick="amUnassignGroup('${dev.mac}','${gid}')"
@@ -1671,8 +1682,8 @@ async function amPlayGroup(tvIp, gid, macId, mac) {
     const r = await api('/player/play', { sessionId, tvIP: tvIp || '', folder, mac });
     if (r.error) throw new Error(r.error);
     if (stEl) stEl.innerHTML = r.applied
-      ? `<span class="ok-text">▶ Playing "${esc(folder)}"</span>`
-      : `<span style="color:var(--muted)">✓ "${esc(folder)}" saved — will play when device connects</span>`;
+      ? `<span class="ok-text">▶ Now playing "${esc(folder)}"</span>`
+      : `<span style="color:var(--accent2)">⏱ "${esc(folder)}" queued • will play when device online</span>`;
   } catch(e) {
     if (stEl) stEl.innerHTML = `<span class="error-text">✗ ${esc(e.message)}</span>`;
     else alert('Play error: ' + e.message);
@@ -1687,7 +1698,7 @@ async function amPlayerOff(tvIp, macId, mac) {
     if (r.error) throw new Error(r.error);
     if (stEl) stEl.innerHTML = r.applied
       ? `<span class="ok-text">■ Autoplay off</span>`
-      : `<span style="color:var(--muted)">✓ Off saved — will apply when device connects</span>`;
+      : `<span style="color:var(--accent2)">⏱ Off queued • will apply when device online</span>`;
   } catch(e) {
     if (stEl) stEl.innerHTML = `<span class="error-text">✗ ${esc(e.message)}</span>`;
     else alert('Off error: ' + e.message);
