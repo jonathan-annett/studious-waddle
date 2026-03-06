@@ -28,6 +28,28 @@ import {
 
 const PORT        = parseInt(process.argv[2] ?? '3000', 10);
 const PROJECT_DIR = path.dirname(new URL(import.meta.url).pathname);
+
+/** Read the current git commit hash (7 chars) from .git without spawning a process. */
+function getGitHash() {
+  try {
+    const head = fs.readFileSync(path.join(PROJECT_DIR, '.git', 'HEAD'), 'utf8').trim();
+    if (head.startsWith('ref: ')) {
+      const ref = head.slice(5); // e.g. refs/heads/master
+      const refFile = path.join(PROJECT_DIR, '.git', ref);
+      try {
+        return fs.readFileSync(refFile, 'utf8').trim().slice(0, 7);
+      } catch {
+        // Ref may be in packed-refs
+        const packed = fs.readFileSync(path.join(PROJECT_DIR, '.git', 'packed-refs'), 'utf8');
+        const line = packed.split('\n').find(l => l.endsWith(' ' + ref));
+        return line ? line.slice(0, 7) : 'unknown';
+      }
+    }
+    return head.slice(0, 7); // detached HEAD
+  } catch { return 'unknown'; }
+}
+
+const SERVER_VERSION = getGitHash();
 const CACHE_DIR   = process.env.NEC_CACHE_DIR
   ? path.resolve(process.env.NEC_CACHE_DIR)
   : path.join(PROJECT_DIR, 'cache');
@@ -375,6 +397,9 @@ function wsUpgrade(req, socket) {
   socket.on('error', () => wsClients.delete(socket));
   socket.on('close', () => wsClients.delete(socket));
   wsClients.add(socket);
+
+  // Push server version so the client can detect restarts and reload
+  try { socket.write(wsFrame(Buffer.from(JSON.stringify({ type: 'server-version', hash: SERVER_VERSION })))); } catch {}
 
   // Push current schedule status immediately so new clients don't wait up to 60s
   try {

@@ -220,6 +220,7 @@
   <button class="btn-secondary"  id="btn-interrogate" onclick="interrogate()" disabled>Interrogate All</button>
   <button class="btn-danger"     id="btn-disconnect"  onclick="disconnect()" disabled>Disconnect</button>
   <span class="spacer"></span>
+  <span id="version-badge" style="font-family:var(--mono);font-size:10px;color:var(--muted);opacity:.5"></span>
   <span id="session-label" style="font-family:var(--mono);font-size:10px;color:var(--muted)"></span>
 </header>
 
@@ -260,6 +261,7 @@ let ws              = null;
 let lastData        = {};
 let deviceOnlineMap = {};      // { mac → { ip, power, name, ... } }
 let expandedDevice  = null;    // { mac } of currently expanded device card
+let knownServerHash = null;    // git hash of the server version we first connected to
 
 // ─── websocket log & device status ──────────────────────────────────────────
 
@@ -267,6 +269,15 @@ function initWs() {
   ws = new WebSocket('ws://' + location.host);
   ws.onmessage = e => {
     const msg = JSON.parse(e.data);
+    if (msg.type === 'server-version') {
+      const badge = document.getElementById('version-badge');
+      if (badge) badge.textContent = msg.hash;
+      if (!knownServerHash) {
+        knownServerHash = msg.hash;          // first connection — record baseline
+      } else if (knownServerHash !== msg.hash) {
+        location.reload();                   // server restarted with new code — reload UI
+      }
+    }
     if (msg.type === 'log') addLog(msg.entry);
     if (msg.type === 'schedule-status') updateSchedBar(msg);
     if (msg.type === 'schedule-alert') handleScheduleAlert(msg);
