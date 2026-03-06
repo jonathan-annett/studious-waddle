@@ -56,6 +56,14 @@ function saveRegistry(reg) {
   fs.writeFileSync(REGISTRY_FILE, JSON.stringify(reg, null, 2));
 }
 
+/** Find a registered device by its tvIp. Returns { mac, device } or null. */
+function findDeviceByTvIp(reg, tvIP) {
+  for (const [mac, device] of Object.entries(reg.devices || {})) {
+    if (device.tvIp === tvIP) return { mac, device };
+  }
+  return null;
+}
+
 /** Normalise any MAC format to lowercase colon-separated aa:bb:cc:dd:ee:ff. */
 function normalizeMac(mac) {
   if (!mac) return '';
@@ -423,9 +431,20 @@ async function handleApi(method, pathname, body, req) {
     const { sessionId, monitorId, tvIP, folder, restoreInput, interval } = body;
     if (!tvIP)    return { error: 'tvIP required' };
     if (!folder)  return { error: 'folder required' };
-    const s   = sessions.get(sessionId);
-    const mid = monitorId ?? s?.monitorId;
-    return playFolder(tvIP, folder, s?.session ?? null, mid, restoreInput ?? 0x11, interval ?? INTERVAL_DEFAULT);
+    const s      = sessions.get(sessionId);
+    const mid    = monitorId ?? s?.monitorId;
+    const result = await playFolder(tvIP, folder, s?.session ?? null, mid, restoreInput ?? 0x11, interval ?? INTERVAL_DEFAULT);
+    // Persist autoplay intent so device-online can restore it if the TV was off
+    if (result.ok) {
+      const reg2  = loadRegistry();
+      const found = findDeviceByTvIp(reg2, tvIP);
+      if (found) {
+        reg2.devices[found.mac].autoplay = folder;
+        saveRegistry(reg2);
+        log('info', `[player/play] autoplay="${folder}" saved for ${found.mac}`);
+      }
+    }
+    return result;
   }
 
   // POST /api/player/filelist  { tvIP, folder }
@@ -467,16 +486,28 @@ async function handleApi(method, pathname, body, req) {
       }
     }
 
+    let stopResult;
     try {
       if (activeSess) {
         await activeSess.vcpSet(mid, 0x00, 0x60, inp);
         log('info', `[player/stop] input restored to 0x${inp.toString(16)}`);
-        return { ok: true, restoredInput: inp };
+        stopResult = { ok: true, restoredInput: inp };
+      } else {
+        stopResult = { ok: true, autoplayDisabled: true, note: 'autoplay off — but could not switch input (no NEC session)' };
       }
-      return { ok: true, autoplayDisabled: true, note: 'autoplay off — but could not switch input (no NEC session)' };
     } finally {
       if (tempSession) await tempSession.close().catch(() => {});
     }
+
+    // Persist off state so device-online does not try to restore playback
+    const reg2  = loadRegistry();
+    const found = findDeviceByTvIp(reg2, tvIP);
+    if (found) {
+      reg2.devices[found.mac].autoplay = null;
+      saveRegistry(reg2);
+      log('info', `[player/stop] autoplay=null saved for ${found.mac}`);
+    }
+    return stopResult;
   }
 
   // POST /api/player/folder  { tvIP }
@@ -676,6 +707,21 @@ async function handleApi(method, pathname, body, req) {
       }
 
       wsBroadcast({ type: 'device-online', category: 'tv', mac, name: device.name, ip, power });
+
+      // Restore autoplay if the device had a folder playing before it went offline.
+      // Fire-and-forget with a short delay to let the TV finish booting.
+      // autoplay=null means the user explicitly turned it off — don't restore.
+      // autoplay missing/undefined means we have no prior state — don't assume.
+      if (device.autoplay) {
+        const folder = device.autoplay;
+        log('info', `[device-online] Scheduling autoplay restore: "${folder}" on ${ip} in 5s`);
+        setTimeout(() => {
+          playFolder(ip, folder, null, 1).catch(e => {
+            log('warn', `[device-online] autoplay restore failed for ${mac}: ${e.message}`);
+          });
+        }, 5000);
+      }
+
       return { ok: true, category: 'tv', mac, name: device.name, ip, power };
     }
 
