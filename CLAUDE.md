@@ -196,7 +196,30 @@ restore an event group or the default.
 - `findConflicts(devices, start, end, excludeEventId, excludeSubId, reg)` → conflict array
 - `validateEvent(event, excludeEventId, reg)` → all conflicts for an event
 - `getDesiredAutoplay(mac, reg)` → folder name string or `null`
+- `getNextEvent(reg)` → `{ eventId, event, subEvent, device, minsUntil }` or `null` (next upcoming event across all devices)
 - `checkSchedule()` → scans all devices, applies correct autoplay state
+- `pushEventGroup(tvIP, group, reg)` → push asset group files to a device (builds file list from cache, calls pushGroupToPlayer)
+
+### Auto-Push on Event Save
+
+When an event is created or updated via `POST /api/events` or `PUT /api/events/:id`:
+1. Save event to registry (with conflict validation)
+2. For each sub-event, for each device:
+   - Lookup the asset group by `groupId`
+   - Call `pushEventGroup(device.tvIp, group, reg)` (fire-and-forget)
+   - Log success or warn on failure
+3. Run `checkSchedule()` to apply correct playback state
+
+This ensures assets are pre-positioned on the media player before the event starts.
+
+### Countdown Logging
+
+Every 60 seconds, the server logs:
+```
+[scheduler] Next event: "EventName" — SubEventName on DeviceName, in X min
+```
+
+This helps admins know what's coming up and whether a server restart is safe.
 
 ---
 

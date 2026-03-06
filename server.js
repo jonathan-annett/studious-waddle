@@ -155,6 +155,40 @@ function getDesiredAutoplay(mac, reg) {
 }
 
 /**
+ * Find the next upcoming event across all registered devices.
+ * Returns { eventId, event, subEvent, device, minsUntil } or null.
+ */
+function getNextEvent(reg) {
+  const now = new Date();
+  let nextSub = null;
+  let nextMinutes = Infinity;
+  let nextEvent = null;
+  let nextDevice = null;
+  let nextEventId = null;
+
+  for (const [eventId, event] of Object.entries(reg.events || {})) {
+    for (const sub of event.subEvents || []) {
+      const startTime = new Date(sub.start);
+      if (startTime < now) continue; // Event already started or past
+      const minsUntil = Math.ceil((startTime - now) / 60_000);
+      if (minsUntil < nextMinutes) {
+        nextMinutes = minsUntil;
+        nextSub = sub;
+        nextEvent = event;
+        nextEventId = eventId;
+        // Find the first device in this sub-event (for logging)
+        if (sub.devices && sub.devices.length > 0) {
+          nextDevice = reg.devices?.[sub.devices[0]];
+        }
+      }
+    }
+  }
+
+  if (!nextSub) return null;
+  return { eventId: nextEventId, event: nextEvent, subEvent: nextSub, device: nextDevice, minsUntil: nextMinutes };
+}
+
+/**
  * Scheduler: check all event-involved devices and apply correct autoplay state.
  * Called every 60s and after event create/update/delete.
  */
@@ -1296,6 +1330,19 @@ async function handleApi(method, pathname, body, req) {
     saveRegistry(reg);
     log('info', `[events] Created event "${name}" (${eventId}) with ${subs.length} sub-event(s)`);
 
+    // Push assets to all affected devices (fire-and-forget)
+    for (const sub of subs) {
+      const group = reg.groups?.[sub.groupId];
+      if (!group) continue;
+      for (const mac of sub.devices) {
+        const device = reg.devices?.[mac];
+        if (!device?.tvIp) continue;
+        pushEventGroup(device.tvIp, group, reg).catch(e => {
+          log('warn', `[event-save] push failed for ${mac}: ${e.message}`);
+        });
+      }
+    }
+
     // Trigger scheduler to apply any immediately active sub-events
     checkSchedule().catch(() => {});
 
@@ -1334,6 +1381,21 @@ async function handleApi(method, pathname, body, req) {
     reg.events[id] = updated;
     saveRegistry(reg);
     log('info', `[events] Updated event "${updated.name}" (${id})`);
+
+    // Push assets to all affected devices (fire-and-forget)
+    if (body.subEvents) {
+      for (const sub of updated.subEvents) {
+        const group = reg.groups?.[sub.groupId];
+        if (!group) continue;
+        for (const mac of sub.devices) {
+          const device = reg.devices?.[mac];
+          if (!device?.tvIp) continue;
+          pushEventGroup(device.tvIp, group, reg).catch(e => {
+            log('warn', `[event-save] push failed for ${mac}: ${e.message}`);
+          });
+        }
+      }
+    }
 
     checkSchedule().catch(() => {});
     return { ok: true, id, event: updated };
@@ -2099,6 +2161,39 @@ async function emergencyUploadFiles(tvIP, files) {
  * Unlike emergencyUploadFiles, this preserves all other folders — it only
  * deletes and recreates the one target folder (createFolder handles that).
  *
+ * Helper for event save: builds file list from asset group, then calls pushGroupToPlayer.
+ */
+async function pushEventGroup(tvIP, group, reg) {
+  if (!group?.assets?.length) return; // empty group, nothing to push
+
+  const files = [];
+  for (const hash of group.assets) {
+    try {
+      const sidecarPath = path.join(CACHE_DIR, hash + '.json');
+      const meta = JSON.parse(await fs.promises.readFile(sidecarPath, 'utf8'));
+      const ext = path.extname(meta.originalName);
+      const filePath = path.join(CACHE_DIR, hash + ext);
+      const data = await fs.promises.readFile(filePath);
+      files.push({
+        filename: meta.originalName,
+        mime: meta.mime,
+        data,
+      });
+    } catch (e) {
+      log('warn', `[event-push] Failed to read asset ${hash}: ${e.message}`);
+      continue;
+    }
+  }
+
+  if (files.length === 0) {
+    log('warn', `[event-push] No valid assets found in group "${group.name}"`);
+    return;
+  }
+
+  return pushGroupToPlayer(tvIP, group.name, files);
+}
+
+/**
  * Flow:
  * 1. Power on via NEC 7142 (if needed)
  * 2. Discover player IP via pjctrl
@@ -2431,6 +2526,16 @@ server.listen(PORT, () => {
   checkSchedule().catch(e => log('warn', `[scheduler] startup check failed: ${e.message}`));
   setInterval(() => {
     checkSchedule().catch(e => log('warn', `[scheduler] tick failed: ${e.message}`));
+  }, 60_000);
+
+  // Log countdown to next event every 60 seconds
+  setInterval(() => {
+    const reg = loadRegistry();
+    const next = getNextEvent(reg);
+    if (next) {
+      const devName = next.device?.name || 'unknown device';
+      log('info', `[scheduler] Next event: "${next.event.name}" — ${next.subEvent.name} on ${devName}, in ${next.minsUntil} min`);
+    }
   }, 60_000);
 });
 
