@@ -81,14 +81,18 @@ RSB=<clock>     Restart media player process
 ```
 V=S,2A,<len>,0,<val>,%00,   Set AutoPlay mode: 0=off, 1=slideshow, 2=mediapack
 V=G,2A,1,0,%00,             Get AutoPlay mode
-V=S,2B,<len>,1,<path>,%00,  Set AutoPlay folder path (DO NOT url-encode slashes)
+V=S,2B,<len>,1,<path>,%00,  Set AutoPlay folder path
 V=G,2B,1,0,%00,             Get AutoPlay folder path
 V=S,22,<len>,0,<secs>,%00,  Set slideshow interval (5–99999 seconds)
 ```
 
-**CRITICAL — V= length field:**
-`<len>` = raw string length + 1 (null terminator). Never use `encodeURIComponent` on the path
-value — slashes are safe after the comma delimiter. This was a hard-won bug fix.
+**CRITICAL — V=S,2B path encoding (verified via DevTools against firmware's own web UI):**
+- Use `encodeURIComponent(folderPath)` on the **full** path — slashes become `%2F`, spaces `%20`
+- `<len>` = **encoded** string length + 1 (null terminator)
+- Example: `/mnt/usb1/Generic MCEC 2` → encoded = `%2Fmnt%2Fusb1%2FGeneric%20MCEC%202` (34 chars) → `len=35`
+- The firmware parses raw URL bytes without percent-decoding, so `len` must match the encoded byte count.
+- (An earlier note here said "never encode slashes — hard-won bug fix". That was a misdiagnosis.
+  The actual firmware requirement is full encoding + encoded length.)
 
 **Filelist API:**
 ```
@@ -221,8 +225,9 @@ This will need to be made dynamic in a future iteration.
    raw.replace(/,(\s*\])/g, '$1')
    ```
 
-3. **V= length field** — must be raw string byte length + 1, not encoded length.
-   Do NOT url-encode path values in V= commands.
+3. **V=S,2B path encoding** — `encodeURIComponent` the full path (slashes included), and set
+   `<len>` to the **encoded** length + 1. The firmware counts raw URL bytes. Verified against
+   the NEC player's own web UI via DevTools network capture.
 
 4. **Input bounce required** — if TV is already on MP input and you change the autoplay folder,
    the player won't reload. Must switch away (800ms) then back to MP.

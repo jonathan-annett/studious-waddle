@@ -1366,6 +1366,13 @@ async function createFolder(playerIP, folderName) {
   await playerRequest(playerIP, `/cgi-bin/cgictrl?FC=${encodeURIComponent(folderName)}`, 'POST');
   log('info', `  createFolder: created "${folderName}"`);
 
+  // Give the firmware a moment to flush the new directory entry to the SD card,
+  // then navigate to root to ensure we are reading the root filelist and not some
+  // undefined post-FC= context.
+  await new Promise(r => setTimeout(r, 400));
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
+  log('info', `  createFolder: re-rooted after creation`);
+
   // 5. Read the updated filelist to locate the actual index of the new folder
   const raw = await playerRequest(playerIP, `/mmb/filelist.json?_=${Date.now()}`, 'GET');
   const fixed = raw.replace(/,(\s*\])/g, '$1');
@@ -1739,13 +1746,14 @@ async function setAutoPlay(playerIP, folderPath, mode = 1) {
   log('info', `  autoplay mode=${mode}`);
 
   // V=S,2B — folder path.
-  // len = raw (decoded) byte count + 1 null terminator — firmware reads this number.
-  // The path must be HTTP-safe: encode each path segment individually so that spaces, #, &
-  // etc become percent-sequences, but join with '/' to keep slash separators literal.
-  // Do NOT encodeURIComponent the full string — that encodes '/' as '%2F' which the firmware
-  // cannot handle (hard-won bug, see CLAUDE.md).
-  const len         = folderPath.length + 1;
-  const encodedPath = folderPath.split('/').map(encodeURIComponent).join('/');
+  // The firmware parses raw URL bytes without decoding percent-sequences first, so:
+  //   • use encodeURIComponent on the FULL path (slashes become %2F, spaces become %20, etc.)
+  //   • len = encoded string length + 1 (null terminator), NOT the raw decoded length
+  // Verified by capturing the NEC player's own web UI via DevTools — it sends e.g.:
+  //   V=S,2B,35,1,%2Fmnt%2Fusb1%2FGeneric%20MCEC%202,%00,
+  // (Previous CLAUDE.md note saying "never encode slashes" was a misdiagnosis.)
+  const encodedPath = encodeURIComponent(folderPath);
+  const len         = encodedPath.length + 1;
   await playerRequest(playerIP, `/cgi-bin/cgictrl?V=S,2B,${len},1,${encodedPath},%00,`, 'POST');
   log('info', `  autoplay folder=${folderPath}`);
 }
