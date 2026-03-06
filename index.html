@@ -1527,6 +1527,28 @@ function renderAmAssets(body) {
   }
   const allGids = Object.keys(amReg?.groups || {});
 
+  // Upcoming/active sub-events per groupId: groupId → [{ eventName, subEventName, start }]
+  const now = Date.now();
+  const groupUpcoming = {};
+  for (const [, ev] of Object.entries(amReg?.events || {})) {
+    for (const sub of ev.subEvents || []) {
+      if (new Date(sub.end).getTime() <= now) continue; // already ended
+      const entry = { eventName: ev.name, subEventName: sub.name, start: sub.start };
+      (groupUpcoming[sub.groupId] = groupUpcoming[sub.groupId] || []).push(entry);
+    }
+  }
+
+  // Format a local datetime as DD/MM/YY HH:MM
+  function fmtDt(isoStr) {
+    const d = new Date(isoStr);
+    const dd = String(d.getDate()).padStart(2,'0');
+    const mm = String(d.getMonth()+1).padStart(2,'0');
+    const yy = String(d.getFullYear()).slice(2);
+    const hh = String(d.getHours()).padStart(2,'0');
+    const mi = String(d.getMinutes()).padStart(2,'0');
+    return `${dd}/${mm}/${yy} ${hh}:${mi}`;
+  }
+
   const isImage = mime => mime && mime.startsWith('image/');
 
   body.innerHTML = `
@@ -1570,6 +1592,31 @@ function renderAmAssets(body) {
             </select>
             <button class="btn-secondary" style="font-size:10px;padding:2px 6px"
               onclick="amTagFromSelect('${item.sha256}','${h8}')">Tag</button>` : '';
+          // Collect upcoming sub-events that reference a group containing this asset
+          const upcomingRefs = (assetGroups[item.sha256] || [])
+            .flatMap(gid => groupUpcoming[gid] || [])
+            .sort((a, b) => new Date(a.start) - new Date(b.start));
+          const canDelete = upcomingRefs.length === 0;
+          let deleteTitle = '';
+          if (!canDelete) {
+            const first = upcomingRefs[0];
+            const rest  = upcomingRefs.length - 1;
+            deleteTitle = `in use @ ${fmtDt(first.start)}` +
+              (rest > 0 ? ` + ${rest} more event${rest > 1 ? 's' : ''}` : '');
+          }
+          const deleteBtn = canDelete
+            ? `<button class="btn-secondary"
+                style="font-size:9px;padding:1px 6px;color:var(--danger);margin-top:4px;align-self:flex-start"
+                onclick="amDeleteAsset('${item.sha256}')">✕ Remove</button>`
+            : `<span title="${esc(deleteTitle)}"
+                style="display:inline-block;margin-top:4px;align-self:flex-start">
+                <button class="btn-secondary" disabled
+                  style="font-size:9px;padding:1px 6px;color:var(--muted);margin:0;
+                         opacity:.45;cursor:not-allowed;pointer-events:none">✕ Remove</button>
+              </span>
+              <span style="font-family:var(--mono);font-size:9px;color:var(--muted);
+                           display:block;margin-top:2px" title="${esc(deleteTitle)}">
+                🔒 ${esc(deleteTitle)}</span>`;
           return `
           <div class="asset-card">
             ${thumb}
@@ -1579,9 +1626,7 @@ function renderAmAssets(body) {
               <div style="display:flex;gap:3px;flex-wrap:wrap;align-items:center;margin-top:3px">
                 ${groupBadges}${tagCtrl}
               </div>
-              <button class="btn-secondary"
-                style="font-size:9px;padding:1px 6px;color:var(--danger);margin-top:4px;align-self:flex-start"
-                onclick="amDeleteAsset('${item.sha256}')">✕ Remove</button>
+              ${deleteBtn}
             </div>
           </div>`;
         }).join('') + `</div>`}
