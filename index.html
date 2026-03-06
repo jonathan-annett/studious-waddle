@@ -936,7 +936,7 @@ function renderPlayer() {
       <span style="color:var(--muted);font-size:11px">Loading folders…</span>
     </div>
     <div class="flex-gap">
-      <button class="btn-warn" onclick="doPlayerStop()" id="player-btn-stop">■ Stop / Restore</button>
+      <button class="btn-warn" onclick="doPlayerStop()" id="player-btn-stop">■ Off</button>
     </div>
     <div style="margin-top:10px" id="player-result"></div>
   </div>`;
@@ -1031,11 +1031,11 @@ async function doPlayerStop() {
     if (b) b.className = 'btn-secondary';
   });
 
-  resultEl.innerHTML = `<span style="color:var(--muted)">Stopping…</span>`;
+  resultEl.innerHTML = `<span style="color:var(--muted)">Turning off autoplay…</span>`;
   try {
-    const r = await api('/player/stop', { tvIP, restoreInput });
+    const r = await api('/player/stop', { sessionId, tvIP, restoreInput });
     resultEl.innerHTML = r.ok
-      ? `<span class="ok-text">✓ Stopped — input restored to 0x${restoreInput.toString(16)}</span>`
+      ? `<span class="ok-text">✓ Autoplay off — input restored</span>`
       : `<span class="error-text">Error: ${esc(JSON.stringify(r))}</span>`;
   } catch(e) {
     resultEl.innerHTML = `<span class="error-text">${esc(e.message)}</span>`;
@@ -1532,7 +1532,12 @@ function renderAmDevices(body) {
                 ? `<div style="font-size:10px;color:var(--muted);margin-bottom:6px">
                      TV&nbsp;IP: ${esc(dev.tvIp)}</div>` : ''}
               <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
-                ${groupBadges}${assignCtrl}
+                ${groupBadges}
+                ${dev.tvIp && devGids.length ? `<button class="btn-warn"
+                  style="font-size:10px;padding:1px 8px;border-radius:10px"
+                  onclick="amPlayerOff('${dev.tvIp}','${macId}')"
+                  title="Turn off autoplay">■ Off</button>` : ''}
+                ${assignCtrl}
               </div>
               ${pushRow}
             </div>
@@ -1634,6 +1639,19 @@ async function amPlayGroup(tvIp, gid, macId) {
   } catch(e) {
     if (stEl) stEl.innerHTML = `<span class="error-text">✗ ${esc(e.message)}</span>`;
     else alert('Play error: ' + e.message);
+  }
+}
+
+async function amPlayerOff(tvIp, macId) {
+  const stEl = document.getElementById('am-pst-' + macId);
+  if (stEl) stEl.textContent = 'Turning off autoplay…';
+  try {
+    const r = await api('/player/stop', { sessionId, tvIP: tvIp });
+    if (r.error) throw new Error(r.error);
+    if (stEl) stEl.innerHTML = `<span class="ok-text">■ Autoplay off</span>`;
+  } catch(e) {
+    if (stEl) stEl.innerHTML = `<span class="error-text">✗ ${esc(e.message)}</span>`;
+    else alert('Off error: ' + e.message);
   }
 }
 

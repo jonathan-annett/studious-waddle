@@ -439,19 +439,44 @@ async function handleApi(method, pathname, body, req) {
     return { ok: true, playerIP, folder, ...result };
   }
 
-  // POST /api/player/stop  { sessionId, tvIP, restoreInput? }
-  // Restores TV input to whatever was active before playing (falls back to HDMI1).
+  // POST /api/player/stop  { tvIP, sessionId?, restoreInput? }
+  // Disables autoplay on the media player (mode=0) and switches TV input back.
+  // Works with or without a persistent session — opens a temporary one if needed.
   if (method === 'POST' && pathname === '/api/player/stop') {
     const { sessionId, monitorId, tvIP, restoreInput } = body;
+    if (!tvIP) return { error: 'tvIP required' };
+
+    // 1. Disable autoplay on the media player
+    const playerIP = await getPlayerIP(tvIP);
+    await playerRequest(playerIP, `/cgi-bin/cgictrl?V=S,2A,2,0,0,%00,`, 'POST');
+    log('info', `[player/stop] autoplay disabled on ${playerIP}`);
+
+    // 2. Switch TV input back (temp session if no persistent one)
     const s   = sessions.get(sessionId);
-    const mid = monitorId ?? s?.monitorId;
+    const mid = monitorId ?? s?.monitorId ?? 1;
     const inp = restoreInput ?? s?.savedInput ?? 0x11;
-    if (s?.session) {
-      const r = await s.session.vcpSet(mid, 0x00, 0x60, inp);
-      log('info', `[player/stop] input restored to 0x${inp.toString(16)}`);
-      return { ok: true, restoredInput: inp, reply: r };
+
+    let tempSession = null;
+    let activeSess  = s?.session ?? null;
+    if (!activeSess) {
+      try {
+        tempSession = await openTcpSession(tvIP, { port: 7142 });
+        activeSess  = tempSession;
+      } catch(e) {
+        log('warn', `[player/stop] temp session failed (${e.message}) — input switch skipped`);
+      }
     }
-    return { error: 'no session — cannot switch input' };
+
+    try {
+      if (activeSess) {
+        await activeSess.vcpSet(mid, 0x00, 0x60, inp);
+        log('info', `[player/stop] input restored to 0x${inp.toString(16)}`);
+        return { ok: true, restoredInput: inp };
+      }
+      return { ok: true, autoplayDisabled: true, note: 'autoplay off — but could not switch input (no NEC session)' };
+    } finally {
+      if (tempSession) await tempSession.close().catch(() => {});
+    }
   }
 
   // POST /api/player/folder  { tvIP }
