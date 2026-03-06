@@ -681,9 +681,17 @@ async function handleApi(method, pathname, body, req) {
   // Classifies the device (known TV / unknown TV / player / suspicious) and
   // broadcasts a typed WebSocket event to all connected browsers.
   if (method === 'POST' && pathname === '/api/device-online') {
-    const { mac: rawMac, ip, port: ethPort } = body;
+    const { mac: rawMac, ip, port: ethPort, up } = body;
     if (!rawMac || !ip) return { error: 'mac and ip required' };
     const mac = normalizeMac(rawMac);
+
+    // Handle device going offline
+    if (up === false) {
+      log('info', `[device-offline] ${mac} (${ip}) disconnected`);
+      wsBroadcast({ type: 'device-offline', mac, ip });
+      return { ok: true, category: 'offline', mac, ip };
+    }
+
     const reg = loadRegistry();
 
     // ── 1. Known media player — silently acknowledge, update IP if changed ──
@@ -2025,6 +2033,27 @@ const server = http.createServer(async (req, res) => {
       res.end(html);
     } catch {
       res.writeHead(500); res.end('index.html not found — place it next to server.js');
+    }
+    return;
+  }
+
+  // GET /api/cache/:hash/file — stream the raw cached file (for thumbnails / preview)
+  if (method === 'GET' && /^\/api\/cache\/[0-9a-f]{64}\/file$/.test(path)) {
+    const hash = path.split('/')[3];
+    try {
+      const meta    = JSON.parse(await fs.promises.readFile(cacheSidecarPath(hash), 'utf8'));
+      const dotIdx  = meta.originalName.lastIndexOf('.');
+      const ext     = dotIdx >= 0 ? meta.originalName.slice(dotIdx) : '';
+      const filePath = cacheFilePath(hash, ext);
+      const stat = await fs.promises.stat(filePath);
+      res.writeHead(200, {
+        'Content-Type': meta.mime || 'application/octet-stream',
+        'Content-Length': stat.size,
+        'Cache-Control': 'public, max-age=31536000, immutable',
+      });
+      fs.createReadStream(filePath).pipe(res);
+    } catch {
+      res.writeHead(404); res.end('Not found');
     }
     return;
   }
