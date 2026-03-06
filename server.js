@@ -421,30 +421,36 @@ async function handleApi(method, pathname, body, req) {
     return { ...r, method: 'formal-delete' };
   }
 
-  // POST /api/player/play  { sessionId, tvIP, folder, restoreInput?, interval? }
-  // Sets the media player autoplay folder, restarts playback, switches TV input to MP.
-  // Bounces input if already on MP so the player picks up the new folder.
-  // interval: seconds per slide. Omit to use server default (30s).
-  //           Automatically overridden to 99999 if folder has only 1 file.
-  //           Returns { error } if folder is empty.
+  // POST /api/player/play  { sessionId, tvIP, folder, mac?, restoreInput?, interval? }
+  // Step 1 (always): save autoplay intent to registry — works even if device is offline.
+  // Step 2 (best-effort): apply to device. Returns { ok, saved, applied, applyError? }.
   if (method === 'POST' && pathname === '/api/player/play') {
-    const { sessionId, monitorId, tvIP, folder, restoreInput, interval } = body;
+    const { sessionId, monitorId, tvIP, folder, mac: rawMac, restoreInput, interval } = body;
     if (!tvIP)    return { error: 'tvIP required' };
     if (!folder)  return { error: 'folder required' };
-    const s      = sessions.get(sessionId);
-    const mid    = monitorId ?? s?.monitorId;
-    const result = await playFolder(tvIP, folder, s?.session ?? null, mid, restoreInput ?? 0x11, interval ?? INTERVAL_DEFAULT);
-    // Persist autoplay intent so device-online can restore it if the TV was off
-    if (result.ok) {
-      const reg2  = loadRegistry();
-      const found = findDeviceByTvIp(reg2, tvIP);
-      if (found) {
-        reg2.devices[found.mac].autoplay = folder;
-        saveRegistry(reg2);
-        log('info', `[player/play] autoplay="${folder}" saved for ${found.mac}`);
-      }
+
+    // Step 1: save intent (registry lookup by explicit mac, fall back to tvIP scan)
+    const devMac = rawMac ? normalizeMac(rawMac) : null;
+    const reg    = loadRegistry();
+    const found  = devMac
+      ? (reg.devices[devMac] ? { mac: devMac, device: reg.devices[devMac] } : null)
+      : findDeviceByTvIp(reg, tvIP);
+    if (found) {
+      reg.devices[found.mac].autoplay = folder;
+      saveRegistry(reg);
+      log('info', `[player/play] autoplay="${folder}" saved for ${found.mac}`);
     }
-    return result;
+
+    // Step 2: apply (best-effort — device may be offline)
+    const s   = sessions.get(sessionId);
+    const mid = monitorId ?? s?.monitorId;
+    try {
+      const result = await playFolder(tvIP, folder, s?.session ?? null, mid, restoreInput ?? 0x11, interval ?? INTERVAL_DEFAULT);
+      return { ...result, saved: !!found, applied: true };
+    } catch(e) {
+      log('warn', `[player/play] apply failed (device offline?): ${e.message}`);
+      return { ok: true, saved: !!found, applied: false, applyError: e.message };
+    }
   }
 
   // POST /api/player/filelist  { tvIP, folder }
@@ -458,56 +464,62 @@ async function handleApi(method, pathname, body, req) {
     return { ok: true, playerIP, folder, ...result };
   }
 
-  // POST /api/player/stop  { tvIP, sessionId?, restoreInput? }
-  // Disables autoplay on the media player (mode=0) and switches TV input back.
-  // Works with or without a persistent session — opens a temporary one if needed.
+  // POST /api/player/stop  { tvIP, sessionId?, mac?, restoreInput? }
+  // Step 1 (always): save autoplay=null to registry — works even if device is offline.
+  // Step 2 (best-effort): disable autoplay on player + restore TV input.
+  // Returns { ok, saved, applied, applyError? }.
   if (method === 'POST' && pathname === '/api/player/stop') {
-    const { sessionId, monitorId, tvIP, restoreInput } = body;
+    const { sessionId, monitorId, tvIP, restoreInput, mac: rawMac } = body;
     if (!tvIP) return { error: 'tvIP required' };
 
-    // 1. Disable autoplay on the media player
-    const playerIP = await getPlayerIP(tvIP);
-    await playerRequest(playerIP, `/cgi-bin/cgictrl?V=S,2A,2,0,0,%00,`, 'POST');
-    log('info', `[player/stop] autoplay disabled on ${playerIP}`);
-
-    // 2. Switch TV input back (temp session if no persistent one)
-    const s   = sessions.get(sessionId);
-    const mid = monitorId ?? s?.monitorId ?? 1;
-    const inp = restoreInput ?? s?.savedInput ?? 0x11;
-
-    let tempSession = null;
-    let activeSess  = s?.session ?? null;
-    if (!activeSess) {
-      try {
-        tempSession = await openTcpSession(tvIP, { port: 7142 });
-        activeSess  = tempSession;
-      } catch(e) {
-        log('warn', `[player/stop] temp session failed (${e.message}) — input switch skipped`);
-      }
-    }
-
-    let stopResult;
-    try {
-      if (activeSess) {
-        await activeSess.vcpSet(mid, 0x00, 0x60, inp);
-        log('info', `[player/stop] input restored to 0x${inp.toString(16)}`);
-        stopResult = { ok: true, restoredInput: inp };
-      } else {
-        stopResult = { ok: true, autoplayDisabled: true, note: 'autoplay off — but could not switch input (no NEC session)' };
-      }
-    } finally {
-      if (tempSession) await tempSession.close().catch(() => {});
-    }
-
-    // Persist off state so device-online does not try to restore playback
-    const reg2  = loadRegistry();
-    const found = findDeviceByTvIp(reg2, tvIP);
+    // Step 1: save intent
+    const devMac = rawMac ? normalizeMac(rawMac) : null;
+    const reg    = loadRegistry();
+    const found  = devMac
+      ? (reg.devices[devMac] ? { mac: devMac, device: reg.devices[devMac] } : null)
+      : findDeviceByTvIp(reg, tvIP);
     if (found) {
-      reg2.devices[found.mac].autoplay = null;
-      saveRegistry(reg2);
+      reg.devices[found.mac].autoplay = null;
+      saveRegistry(reg);
       log('info', `[player/stop] autoplay=null saved for ${found.mac}`);
     }
-    return stopResult;
+
+    // Step 2: apply (best-effort)
+    let applied = false;
+    let applyError = null;
+    try {
+      const playerIP = await getPlayerIP(tvIP);
+      await playerRequest(playerIP, `/cgi-bin/cgictrl?V=S,2A,2,0,0,%00,`, 'POST');
+      log('info', `[player/stop] autoplay disabled on ${playerIP}`);
+
+      const s         = sessions.get(sessionId);
+      const mid       = monitorId ?? s?.monitorId ?? 1;
+      const inp       = restoreInput ?? s?.savedInput ?? 0x11;
+      let tempSession = null;
+      let activeSess  = s?.session ?? null;
+      if (!activeSess) {
+        try {
+          tempSession = await openTcpSession(tvIP, { port: 7142 });
+          activeSess  = tempSession;
+        } catch(e) {
+          log('warn', `[player/stop] temp session failed (${e.message}) — input switch skipped`);
+        }
+      }
+      try {
+        if (activeSess) {
+          await activeSess.vcpSet(mid, 0x00, 0x60, inp);
+          log('info', `[player/stop] input restored to 0x${inp.toString(16)}`);
+        }
+      } finally {
+        if (tempSession) await tempSession.close().catch(() => {});
+      }
+      applied = true;
+    } catch(e) {
+      log('warn', `[player/stop] apply failed (device offline?): ${e.message}`);
+      applyError = e.message;
+    }
+
+    return { ok: true, saved: !!found, applied, ...(applyError ? { applyError } : {}) };
   }
 
   // POST /api/player/folder  { tvIP }

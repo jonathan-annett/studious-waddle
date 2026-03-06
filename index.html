@@ -1489,7 +1489,7 @@ function renderAmDevices(body) {
           const name = gid === 'all' ? 'all' : (groups[gid]?.name || gid);
           const cls  = gid === 'all' ? 'badge-grey' : 'badge-blue';
           return `<span class="badge ${cls}" style="cursor:default">
-            <span onclick="amPlayGroup('${dev.tvIp}','${gid}','${macId}')"
+            <span onclick="amPlayGroup('${dev.tvIp}','${gid}','${macId}','${dev.mac}')"
               style="cursor:pointer" title="▶ Play ${esc(name)} now">
               ${esc(name)}
             </span>
@@ -1533,9 +1533,9 @@ function renderAmDevices(body) {
                      TV&nbsp;IP: ${esc(dev.tvIp)}</div>` : ''}
               <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
                 ${groupBadges}
-                ${dev.tvIp && devGids.length ? `<button class="btn-warn"
+                ${devGids.length ? `<button class="btn-warn"
                   style="font-size:10px;padding:1px 8px;border-radius:10px"
-                  onclick="amPlayerOff('${dev.tvIp}','${macId}')"
+                  onclick="amPlayerOff('${dev.tvIp || ''}','${macId}','${dev.mac}')"
                   title="Turn off autoplay">■ Off</button>` : ''}
                 ${assignCtrl}
               </div>
@@ -1626,29 +1626,32 @@ async function amUnassignGroup(mac, groupId) {
   } catch(e) { alert('Error: ' + e.message); }
 }
 
-async function amPlayGroup(tvIp, gid, macId) {
-  if (!tvIp) { alert('No TV IP stored for this device.'); return; }
+async function amPlayGroup(tvIp, gid, macId, mac) {
   const groups = amReg?.groups || {};
   const folder = gid === 'all' ? 'all' : (groups[gid]?.name || gid);
   const stEl   = document.getElementById('am-pst-' + macId);
-  if (stEl) stEl.textContent = `Playing "${folder}"…`;
+  if (stEl) stEl.textContent = `Setting autoplay "${folder}"…`;
   try {
-    const r = await api('/player/play', { sessionId, tvIP: tvIp, folder });
+    const r = await api('/player/play', { sessionId, tvIP: tvIp || '', folder, mac });
     if (r.error) throw new Error(r.error);
-    if (stEl) stEl.innerHTML = `<span class="ok-text">▶ Playing "${esc(folder)}"</span>`;
+    if (stEl) stEl.innerHTML = r.applied
+      ? `<span class="ok-text">▶ Playing "${esc(folder)}"</span>`
+      : `<span style="color:var(--muted)">✓ "${esc(folder)}" saved — will play when device connects</span>`;
   } catch(e) {
     if (stEl) stEl.innerHTML = `<span class="error-text">✗ ${esc(e.message)}</span>`;
     else alert('Play error: ' + e.message);
   }
 }
 
-async function amPlayerOff(tvIp, macId) {
+async function amPlayerOff(tvIp, macId, mac) {
   const stEl = document.getElementById('am-pst-' + macId);
-  if (stEl) stEl.textContent = 'Turning off autoplay…';
+  if (stEl) stEl.textContent = 'Setting autoplay off…';
   try {
-    const r = await api('/player/stop', { sessionId, tvIP: tvIp });
+    const r = await api('/player/stop', { sessionId, tvIP: tvIp || '', mac });
     if (r.error) throw new Error(r.error);
-    if (stEl) stEl.innerHTML = `<span class="ok-text">■ Autoplay off</span>`;
+    if (stEl) stEl.innerHTML = r.applied
+      ? `<span class="ok-text">■ Autoplay off</span>`
+      : `<span style="color:var(--muted)">✓ Off saved — will apply when device connects</span>`;
   } catch(e) {
     if (stEl) stEl.innerHTML = `<span class="error-text">✗ ${esc(e.message)}</span>`;
     else alert('Off error: ' + e.message);
