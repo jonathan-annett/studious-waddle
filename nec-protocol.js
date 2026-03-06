@@ -541,17 +541,24 @@ export const Parsers = {
     if (cmd !== 'CB02') throw new NecError('UNEXPECTED_REPLY', `Expected CB02, got ${cmd}`);
     const status = fromAsciiHex(msgBody, 5, 2);
     if (status !== 0) return { ok: false, status };
-    const mv  = fromAsciiHex(msgBody, 9,  2);
-    const bv1 = fromAsciiHex(msgBody, 13, 2);
-    const bv2 = fromAsciiHex(msgBody, 15, 2);
-    const bv3 = fromAsciiHex(msgBody, 17, 2);
-    const br1 = fromAsciiHex(msgBody, 19, 2);
-    const br2 = fromAsciiHex(msgBody, 21, 2);
-    const brStr = [br1, br2]
-      .filter(b => b >= 0x41 && b <= 0x5A)
-      .map(b => String.fromCharCode(b)).join('');
-    const version = `${mv}.${bv1}${bv2}${bv3}${brStr}`;
-    return { ok: true, version, mv, bv1, bv2, bv3, br1: String.fromCharCode(br1), br2: String.fromCharCode(br2) };
+    try {
+      const mv  = fromAsciiHex(msgBody, 9,  2);
+      const bv1 = fromAsciiHex(msgBody, 13, 2);
+      const bv2 = fromAsciiHex(msgBody, 15, 2);
+      const bv3 = fromAsciiHex(msgBody, 17, 2);
+      const br1 = fromAsciiHex(msgBody, 19, 2);
+      const br2 = fromAsciiHex(msgBody, 21, 2);
+      const brStr = [br1, br2]
+        .filter(b => b >= 0x41 && b <= 0x5A)
+        .map(b => String.fromCharCode(b)).join('');
+      const version = `${mv}.${bv1}${bv2}${bv3}${brStr}`;
+      return { ok: true, version, mv, bv1, bv2, bv3, br1: String.fromCharCode(br1), br2: String.fromCharCode(br2) };
+    } catch {
+      // Firmware uses a non-standard version encoding (non-hex chars in version fields).
+      // Fall back to returning the raw ASCII payload after the status bytes.
+      const version = msgBody.slice(7, -1).toString('ascii').replace(/\x00/g, '').trim();
+      return { ok: true, version, raw: true };
+    }
   },
 
   /**
@@ -600,11 +607,38 @@ class Transport extends EventEmitter {
   /** Called by subclass when bytes arrive. */
   _onData(chunk) {
     this._rxBuf = Buffer.concat([this._rxBuf, chunk]);
-    // Deliver complete frames (terminated by CR) to waiters in order
-    let pos;
-    while ((pos = this._rxBuf.indexOf(CR)) !== -1) {
-      const frame = this._rxBuf.slice(0, pos + 1);
-      this._rxBuf = this._rxBuf.slice(pos + 1);
+    // Use length-based framing: read the declared message length from the
+    // packet header (bytes 5–6, ASCII-hex) to know the exact packet size.
+    // CR-scanning alone is unreliable because the BCC checksum byte can
+    // legitimately equal 0x0D, causing premature frame detection.
+    while (true) {
+      // Need at least 7 bytes to parse the header and declared length
+      if (this._rxBuf.length < 7) break;
+
+      if (this._rxBuf[0] !== SOH) {
+        // Out of sync — discard bytes until we find SOH
+        const next = this._rxBuf.indexOf(SOH, 1);
+        this._rxBuf = next !== -1 ? this._rxBuf.slice(next) : Buffer.alloc(0);
+        continue;
+      }
+
+      // Bytes 5–6 are the declared message body length (2 ASCII-hex chars)
+      let declaredLen;
+      try {
+        declaredLen = fromAsciiHex(this._rxBuf, 5, 2);
+      } catch {
+        // Malformed length field — discard SOH and attempt resync
+        this._rxBuf = this._rxBuf.slice(1);
+        continue;
+      }
+
+      // Full packet = 7 (header) + declaredLen (body) + 1 (BCC) + 1 (CR)
+      const fullLen = 7 + declaredLen + 2;
+      if (this._rxBuf.length < fullLen) break; // wait for more data
+
+      const frame = this._rxBuf.slice(0, fullLen);
+      this._rxBuf = this._rxBuf.slice(fullLen);
+
       const waiter = this._waiters.shift();
       if (waiter) {
         clearTimeout(waiter.timer);
