@@ -172,15 +172,20 @@ events: {
       {
         id: "abc123",
         name: "Morning Keynote",
-        groupId: "gid_xyz",          // asset group to display
-        devices: ["aa:bb:cc:dd:ee:ff", ...],  // MAC addresses
-        start: "2026-03-10T09:00",   // local time, hour granularity
-        end: "2026-03-10T12:00"
+        groupId: "gid_xyz",                    // asset group to display
+        devices: ["aa:bb:cc:dd:ee:ff", ...],   // MAC addresses
+        start: "2026-03-09T22:00:00.000Z",     // UTC ISO 8601 (toISOString())
+        end: "2026-03-10T01:00:00.000Z"        // UTC ISO 8601 (toISOString())
       }
     ]
   }
 }
 ```
+
+Times are stored as UTC ISO strings (JavaScript `toISOString()` output, always ending in `Z`).
+The UI converts the user's local time → UTC before sending, and converts back UTC → local for
+display. The server compares using `new Date(sub.start)` vs `new Date()` — both UTC, correct
+regardless of the server's local timezone (typically UTC on OpenWrt).
 
 Each device gains `defaultGroup: "gid_abc"` — the group shown when no event is active.
 
