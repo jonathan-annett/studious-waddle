@@ -1996,14 +1996,16 @@ function waitForPlayerReady(playerIP, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
     function attempt() {
-      playerRequest(playerIP, `/mmb/filelist.json?_=${Date.now()}`, 'GET',
+      const url = `/mmb/filelist.json?_=${Date.now()}`;
+      playerRequest(playerIP, url, 'GET',
         null, { referer: `http://${playerIP}/sd_card_viewer.html` })
         .then(body => {
+          log('info', `[waitForPlayerReady] http://${playerIP}${url} → ${body.slice(0, 120)}`);
           const fixed = body.replace(/,(\s*\])/g, '$1');
-          try { JSON.parse(fixed); resolve(); }        // valid JSON — CGI ready
-          catch { retry(); }                           // HTML/garbage — not ready yet
+          try { JSON.parse(fixed); log('info', `[waitForPlayerReady] CGI ready on ${playerIP}`); resolve(); }
+          catch { log('info', `[waitForPlayerReady] not ready yet (HTML/garbage) — retrying`); retry(); }
         })
-        .catch(() => retry());                         // TCP error — not up yet
+        .catch(e => { log('info', `[waitForPlayerReady] TCP error on ${playerIP}: ${e.message} — retrying`); retry(); });
     }
     function retry() {
       if (Date.now() >= deadline)
@@ -2517,10 +2519,17 @@ async function getPlayerFolderContents(playerIP, folder) {
   await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
 
   // Read root filelist to find folder index
-  const rootRaw = await playerRequest(playerIP, `/mmb/filelist.json?_=${Date.now()}`, 'GET',
+  const rootUrl = `/mmb/filelist.json?_=${Date.now()}`;
+  const rootRaw = await playerRequest(playerIP, rootUrl, 'GET',
     null, { referer: `http://${playerIP}/sd_card_viewer.html` });
+  log('info', `[filelist] GET http://${playerIP}${rootUrl} → ${rootRaw.slice(0, 200)}`);
   const rootFixed = rootRaw.replace(/,(\s*\])/g, '$1');
-  const root = JSON.parse(rootFixed);
+  let root;
+  try { root = JSON.parse(rootFixed); }
+  catch (e) {
+    log('error', `[filelist] JSON parse failed for root listing from http://${playerIP}${rootUrl}: ${e.message}\nFull response: ${rootRaw}`);
+    throw e;
+  }
 
   const folderIdx = root.fileinfo.findIndex(f => f.name === folder && f.type === 0);
   if (folderIdx < 0) throw new Error(`Folder "${folder}" not found on player`);
@@ -2530,10 +2539,17 @@ async function getPlayerFolderContents(playerIP, folder) {
   await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=${idxStr}`, 'POST');
 
   // Read folder contents
-  const raw   = await playerRequest(playerIP, `/mmb/filelist.json?_=${Date.now()}`, 'GET',
+  const folderUrl = `/mmb/filelist.json?_=${Date.now()}`;
+  const raw   = await playerRequest(playerIP, folderUrl, 'GET',
     null, { referer: `http://${playerIP}/sd_card_viewer.html` });
+  log('info', `[filelist] GET http://${playerIP}${folderUrl} → ${raw.slice(0, 200)}`);
   const fixed = raw.replace(/,(\s*\])/g, '$1');
-  const list  = JSON.parse(fixed);
+  let list;
+  try { list = JSON.parse(fixed); }
+  catch (e) {
+    log('error', `[filelist] JSON parse failed for folder listing from http://${playerIP}${folderUrl}: ${e.message}\nFull response: ${raw}`);
+    throw e;
+  }
 
   // Navigate back to root
   await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
