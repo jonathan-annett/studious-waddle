@@ -1146,117 +1146,467 @@ async function startUpload() {
   }
 }
 
-// ─── asset cache ─────────────────────────────────────────────────────────────
+// ─── asset manager ────────────────────────────────────────────────────────────
 
-async function loadCache() {
+let amTab   = 'assets';  // 'assets' | 'groups' | 'devices'
+let amReg   = null;      // { groups: {id→{name,assets[]}}, devices: {mac→{…}} }
+let amItems = [];        // cached asset array
+
+async function loadAssetManager() {
   const el = document.getElementById('card-cache');
   if (!el) return;
-  el.innerHTML = `
-  <div class="card-header">
-    <h2>Asset Cache</h2>
-    <div class="flex-gap">
-      <button class="btn-secondary" onclick="loadCache()">↺ Refresh</button>
-      <label class="btn-secondary" style="cursor:pointer">
-        ＋ Store File(s)
-        <input type="file" id="cache-file-input" accept="video/*,image/jpeg,image/png"
-          multiple style="display:none" onchange="storeToCache(this)">
-      </label>
-    </div>
-  </div>
-  <div class="card-body" id="cache-body">
-    <span style="color:var(--muted);font-size:12px">Loading…</span>
-  </div>`;
-
   try {
-    const { items } = await api('/cache', null, 'GET');
-    const bodyEl = document.getElementById('cache-body');
-    if (!items.length) {
-      bodyEl.innerHTML = '<span style="color:var(--muted);font-size:12px">No cached assets yet.</span>';
-      return;
-    }
-    bodyEl.innerHTML = items.map(item => `
-    <div class="cache-item" style="display:flex;align-items:center;gap:10px;padding:6px 0;
-         border-bottom:1px solid var(--border);font-size:12px">
-      <div style="flex:1;min-width:0">
-        <div style="font-family:var(--mono);font-size:11px;color:var(--text);
-             white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
-             title="${esc(item.displayName)}">${esc(item.displayName)}</div>
-        <div style="color:var(--muted);font-size:10px;margin-top:2px">
-          ${esc(item.originalName)} · ${(item.size/1024).toFixed(1)} KB ·
-          ${new Date(item.cachedAt).toLocaleString()}
-          ${item.sentTo.length ? ` · sent to ${item.sentTo.length} TV(s)` : ''}
-        </div>
-      </div>
-      <div class="flex-gap" style="flex-shrink:0">
-        <button class="btn-primary" style="font-size:11px;padding:3px 8px"
-          onclick="sendCachedAsset('${esc(item.sha256)}', '${esc(item.displayName)}')">
-          ⬆ Send to TV
-        </button>
-        <button class="btn-secondary" style="font-size:11px;padding:3px 8px;color:var(--error,#e06)"
-          onclick="deleteCachedAsset('${esc(item.sha256)}')">✕</button>
-      </div>
-    </div>`).join('');
+    const [reg, { items }] = await Promise.all([
+      api('/registry', null, 'GET'),
+      api('/cache',    null, 'GET'),
+    ]);
+    amReg   = reg;
+    amItems = items || [];
   } catch(e) {
-    const bodyEl = document.getElementById('cache-body');
-    if (bodyEl) bodyEl.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>';
+    el.innerHTML =
+      `<div class="card-header"><h2>Asset Manager</h2></div>` +
+      `<div class="card-body"><span class="error-text">Load failed: ${esc(e.message)}</span></div>`;
+    return;
   }
+  renderAssetManager();
 }
 
-async function storeToCache(input) {
+function renderAssetManager() {
+  const el = document.getElementById('card-cache');
+  if (!el) return;
+  const gc = Object.keys(amReg?.groups  || {}).length;
+  const dc = Object.keys(amReg?.devices || {}).length;
+  el.innerHTML = `
+  <div class="card-header">
+    <h2>Asset Manager</h2>
+    <div class="flex-gap">
+      <button class="${amTab==='assets'  ? 'btn-primary':'btn-secondary'}"
+        style="font-size:11px;padding:3px 10px" onclick="amSetTab('assets')">
+        Assets&nbsp;(${amItems.length})</button>
+      <button class="${amTab==='groups'  ? 'btn-primary':'btn-secondary'}"
+        style="font-size:11px;padding:3px 10px" onclick="amSetTab('groups')">
+        Groups&nbsp;(${gc})</button>
+      <button class="${amTab==='devices' ? 'btn-primary':'btn-secondary'}"
+        style="font-size:11px;padding:3px 10px" onclick="amSetTab('devices')">
+        Devices&nbsp;(${dc})</button>
+      <button class="btn-secondary" style="font-size:11px;padding:3px 8px"
+        onclick="loadAssetManager()">↺</button>
+    </div>
+  </div>
+  <div class="card-body" id="am-body" style="gap:0;padding:12px 16px"></div>`;
+  const body = document.getElementById('am-body');
+  if (amTab === 'assets')  renderAmAssets(body);
+  if (amTab === 'groups')  renderAmGroups(body);
+  if (amTab === 'devices') renderAmDevices(body);
+}
+
+function amSetTab(tab) { amTab = tab; renderAssetManager(); }
+
+// ── Assets tab ────────────────────────────────────────────────────────────────
+
+function renderAmAssets(body) {
+  // Reverse map: sha256 → [groupId, ...]
+  const assetGroups = {};
+  for (const [gid, grp] of Object.entries(amReg?.groups || {})) {
+    for (const h of grp.assets) {
+      (assetGroups[h] = assetGroups[h] || []).push(gid);
+    }
+  }
+  const allGids = Object.keys(amReg?.groups || {});
+
+  body.innerHTML = `
+  <div style="margin-bottom:10px">
+    <label class="btn-secondary" style="cursor:pointer;font-size:11px;padding:3px 10px">
+      ＋ Upload
+      <input type="file" id="am-file-input" accept="video/*,image/jpeg,image/png"
+        multiple style="display:none" onchange="amStoreFiles(this)">
+    </label>
+  </div>
+  <div id="am-assets-list">
+    ${amItems.length === 0
+      ? '<span style="color:var(--muted);font-size:12px">No cached assets yet.</span>'
+      : amItems.map(item => {
+          const gids = assetGroups[item.sha256] || [];
+          const h8   = item.sha256.slice(0, 8);
+          const groupBadges =
+            '<span class="badge badge-grey">all</span>' +
+            gids.map(gid =>
+              `<span class="badge badge-blue" style="cursor:default">
+                ${esc(amReg.groups[gid]?.name || gid)}
+                <button onclick="amRemoveFromGroup('${item.sha256}','${gid}')"
+                  style="background:none;border:none;color:inherit;cursor:pointer;
+                  padding:0 0 0 3px;font-size:10px;line-height:1">×</button>
+              </span>`
+            ).join('');
+          const available = allGids.filter(g => !gids.includes(g));
+          const tagCtrl = available.length ? `
+            <select id="am-grpsel-${h8}"
+              style="font-size:10px;padding:2px 4px;background:var(--bg-input);
+              color:var(--text);border:1px solid var(--border);border-radius:3px">
+              <option value="">＋ Tag…</option>
+              ${available.map(g =>
+                `<option value="${g}">${esc(amReg.groups[g].name)}</option>`
+              ).join('')}
+            </select>
+            <button class="btn-secondary" style="font-size:10px;padding:2px 6px"
+              onclick="amTagFromSelect('${item.sha256}','${h8}')">Tag</button>` : '';
+          return `
+          <div style="padding:7px 0;border-bottom:1px solid var(--border)">
+            <div style="display:flex;align-items:flex-start;gap:8px">
+              <div style="flex:1;min-width:0">
+                <div style="font-family:var(--mono);font-size:11px;white-space:nowrap;
+                     overflow:hidden;text-overflow:ellipsis;color:var(--text)"
+                     title="${esc(item.displayName)}">${esc(item.originalName)}</div>
+                <div style="color:var(--muted);font-size:10px;margin-top:2px">
+                  ${(item.size/1024).toFixed(1)} KB · ${new Date(item.cachedAt).toLocaleDateString()}
+                </div>
+                <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;margin-top:5px">
+                  ${groupBadges}${tagCtrl}
+                </div>
+              </div>
+              <button class="btn-secondary"
+                style="font-size:10px;padding:2px 8px;color:var(--danger);flex-shrink:0"
+                onclick="amDeleteAsset('${item.sha256}')">✕</button>
+            </div>
+          </div>`;
+        }).join('')}
+  </div>`;
+}
+
+function amTagFromSelect(hash, h8) {
+  const sel = document.getElementById('am-grpsel-' + h8);
+  if (!sel || !sel.value) return;
+  amAddToGroup(hash, sel.value);
+}
+
+async function amStoreFiles(input) {
   const files = input.files;
   if (!files.length) return;
-  const bodyEl = document.getElementById('cache-body');
-  if (bodyEl) bodyEl.innerHTML = `<span style="color:var(--muted);font-size:12px">Storing ${files.length} file(s)…</span>`;
-
-  const formData = new FormData();
-  for (const file of files) formData.append('file', file, file.name);
-
+  const body = document.getElementById('am-body');
+  if (body) body.innerHTML =
+    `<span style="color:var(--muted);font-size:12px">Storing ${files.length} file(s)…</span>`;
+  const fd = new FormData();
+  for (const f of files) fd.append('file', f, f.name);
   try {
-    const resp = await fetch('/api/cache/store', { method: 'POST', body: formData });
+    const resp = await fetch('/api/cache/store', { method: 'POST', body: fd });
     const json = await resp.json();
     if (json.error) throw new Error(json.error);
     input.value = '';
-    await loadCache();
+    await loadAssetManager();
   } catch(e) {
-    if (bodyEl) bodyEl.innerHTML = '<span class="error-text">✗ ' + esc(e.message) + '</span>';
+    if (body) body.innerHTML = '<span class="error-text">✗ ' + esc(e.message) + '</span>';
   }
 }
 
-async function sendCachedAsset(hash, displayName) {
-  const tvIP = prompt(`Send "${displayName}" to TV IP:`);
-  if (!tvIP) return;
-  const bodyEl = document.getElementById('cache-body');
-  // Show status inline
-  const statusId = 'cache-send-' + hash.slice(0, 8);
-  const row = document.querySelector(`[onclick*="${hash.slice(0,16)}"]`)?.closest('.cache-item');
-  const statusSpan = row
-    ? (row.querySelector('.cache-send-status') ||
-       (() => { const s = document.createElement('span');
-                s.className='cache-send-status';
-                s.style.cssText='font-size:10px;color:var(--muted)';
-                row.appendChild(s); return s; })())
-    : null;
-  if (statusSpan) statusSpan.textContent = ' Sending…';
-
-  try {
-    const r = await api('/cache/send', { hash, tvIP });
-    if (r.error) throw new Error(r.error);
-    if (statusSpan) statusSpan.innerHTML = ' <span class="ok-text">✓ sent</span>';
-    await loadCache(); // refresh sentTo count
-  } catch(e) {
-    if (statusSpan) statusSpan.innerHTML = ' <span class="error-text">✗ ' + esc(e.message) + '</span>';
-    else alert('Error: ' + e.message);
-  }
-}
-
-async function deleteCachedAsset(hash) {
-  if (!confirm('Remove this asset from cache?')) return;
+async function amDeleteAsset(hash) {
+  if (!confirm('Remove this asset from the cache?')) return;
   try {
     const r = await fetch('/api/cache/' + hash, { method: 'DELETE' });
-    const json = await r.json();
-    if (json.error) throw new Error(json.error);
-    await loadCache();
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    await loadAssetManager();
   } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amAddToGroup(hash, groupId) {
+  try {
+    const r = await api('/groups/' + groupId + '/assets', { hashes: [hash] });
+    if (r.error) throw new Error(r.error);
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amRemoveFromGroup(hash, groupId) {
+  try {
+    const r = await fetch('/api/groups/' + groupId + '/assets/' + hash, { method: 'DELETE' });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ── Groups tab ────────────────────────────────────────────────────────────────
+
+function renderAmGroups(body) {
+  const groups = Object.entries(amReg?.groups || {});
+  body.innerHTML = `
+  <div class="form-row" style="margin-bottom:14px">
+    <div class="form-group">
+      <label>New group name</label>
+      <input type="text" id="am-new-grp" placeholder="e.g. Lobby Slides" style="width:200px">
+    </div>
+    <button class="btn-primary" style="font-size:11px;padding:4px 12px;align-self:flex-end"
+      onclick="amCreateGroup()">＋ Create</button>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;padding:7px 0;
+       border-bottom:1px solid var(--border);margin-bottom:2px">
+    <span class="badge badge-grey">all</span>
+    <span style="font-size:11px;color:var(--muted)">
+      pseudo-group · ${amItems.length} asset${amItems.length !== 1 ? 's' : ''} (every cached file)
+    </span>
+  </div>
+  ${groups.length === 0
+    ? '<div style="color:var(--muted);font-size:12px;margin-top:10px">No custom groups yet.</div>'
+    : groups.map(([id, grp]) => {
+        const count = grp.assets.length;
+        return `
+        <div style="display:flex;align-items:center;gap:8px;padding:7px 0;
+             border-bottom:1px solid var(--border)">
+          <span class="badge badge-blue"
+            style="min-width:0;max-width:120px;overflow:hidden;text-overflow:ellipsis;
+            white-space:nowrap" title="${esc(grp.name)}">${esc(grp.name)}</span>
+          <span style="font-size:10px;color:var(--muted);flex:1">
+            ${count} asset${count !== 1 ? 's' : ''}
+          </span>
+          <input type="text" id="am-ren-${id}" value="${esc(grp.name)}"
+            style="font-family:var(--mono);font-size:11px;padding:3px 6px;
+            background:var(--bg-input);color:var(--text);border:1px solid var(--border);
+            border-radius:4px;width:150px">
+          <button class="btn-secondary" style="font-size:10px;padding:2px 8px"
+            onclick="amRenameGroup('${id}')">Rename</button>
+          <button class="btn-secondary" style="font-size:10px;padding:2px 8px;color:var(--danger)"
+            onclick="amDeleteGroup('${id}')">Delete</button>
+        </div>`;
+      }).join('')}`;
+}
+
+async function amCreateGroup() {
+  const inp  = document.getElementById('am-new-grp');
+  const name = inp?.value.trim();
+  if (!name) { alert('Enter a group name.'); return; }
+  try {
+    const r = await api('/groups', { name });
+    if (r.error) throw new Error(r.error);
+    inp.value = '';
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amRenameGroup(id) {
+  const inp  = document.getElementById('am-ren-' + id);
+  const name = inp?.value.trim();
+  if (!name) { alert('Name cannot be empty.'); return; }
+  try {
+    const r = await fetch('/api/groups/' + id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amDeleteGroup(id) {
+  const grp = amReg?.groups?.[id];
+  if (!confirm(`Delete group "${grp?.name}"? Assets remain cached; only the grouping is removed.`)) return;
+  try {
+    const r = await fetch('/api/groups/' + id, { method: 'DELETE' });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ── Devices tab ────────────────────────────────────────────────────────────────
+
+function renderAmDevices(body) {
+  const devices = Object.entries(amReg?.devices || {}).map(([mac, d]) => ({ mac, ...d }));
+  const groups  = amReg?.groups || {};
+  const allGids = Object.keys(groups);
+
+  body.innerHTML = `
+  <div style="background:var(--bg);border:1px solid var(--border);border-radius:5px;
+       padding:12px;margin-bottom:14px">
+    <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+         text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">Register Device</div>
+    <div class="form-row">
+      <div class="form-group" style="flex:1;min-width:150px">
+        <label>TV MAC (from NEC interrogation)</label>
+        <input type="text" id="am-reg-mac" placeholder="aa:bb:cc:dd:ee:ff">
+      </div>
+      <div class="form-group" style="flex:1;min-width:120px">
+        <label>Device name</label>
+        <input type="text" id="am-reg-name" placeholder="Lobby TV">
+      </div>
+      <div class="form-group" style="min-width:130px">
+        <label>TV IP address</label>
+        <input type="text" id="am-reg-ip" placeholder="192.168.100.198">
+      </div>
+      <div style="display:flex;gap:6px;align-self:flex-end">
+        <button class="btn-primary" style="font-size:11px;padding:4px 12px"
+          onclick="amRegisterDevice()">＋ Register</button>
+        ${sessionId ? `
+        <button class="btn-secondary" style="font-size:11px;padding:4px 10px"
+          onclick="amFillFromSession()" title="Copy MAC + IP from current TV session">
+          Use current TV
+        </button>` : ''}
+      </div>
+    </div>
+  </div>
+  ${devices.length === 0
+    ? '<div style="color:var(--muted);font-size:12px">No devices registered yet.</div>'
+    : devices.map(dev => {
+        const devGids = dev.groups || [];
+        const macId   = dev.mac.replace(/:/g, '');
+        const groupBadges = devGids.map(gid => {
+          const name = gid === 'all' ? 'all' : (groups[gid]?.name || gid);
+          const cls  = gid === 'all' ? 'badge-grey' : 'badge-blue';
+          return `<span class="badge ${cls}" style="cursor:default">
+            ${esc(name)}
+            <button onclick="amUnassignGroup('${dev.mac}','${gid}')"
+              style="background:none;border:none;color:inherit;cursor:pointer;
+              padding:0 0 0 3px;font-size:10px;line-height:1">×</button>
+          </span>`;
+        }).join('');
+        const unassigned = ['all', ...allGids].filter(g => !devGids.includes(g));
+        const assignCtrl = unassigned.length ? `
+          <select id="am-agrp-${macId}"
+            style="font-size:10px;padding:2px 4px;background:var(--bg-input);
+            color:var(--text);border:1px solid var(--border);border-radius:3px">
+            <option value="">＋ Assign…</option>
+            ${unassigned.map(g =>
+              `<option value="${g}">${g === 'all' ? 'all' : esc(groups[g]?.name || g)}</option>`
+            ).join('')}
+          </select>
+          <button class="btn-secondary" style="font-size:10px;padding:2px 6px"
+            onclick="amAssignFromSelect('${dev.mac}','${macId}')">Assign</button>` : '';
+        const pushRow = devGids.length ? `
+          <div style="display:flex;gap:6px;align-items:center;margin-top:8px;
+               padding-top:8px;border-top:1px solid var(--border)">
+            <span style="font-size:10px;color:var(--muted)">Push group:</span>
+            <select id="am-push-${macId}"
+              style="font-size:10px;padding:2px 4px;background:var(--bg-input);
+              color:var(--text);border:1px solid var(--border);border-radius:3px">
+              ${devGids.map(g => {
+                const n = g === 'all' ? 'all' : (groups[g]?.name || g);
+                return `<option value="${g}">${esc(n)}</option>`;
+              }).join('')}
+            </select>
+            <button class="btn-primary" style="font-size:10px;padding:2px 10px"
+              onclick="amPush('${dev.mac}','${macId}')">⬆ Push</button>
+            <span id="am-pst-${macId}" style="font-size:10px;color:var(--muted)"></span>
+          </div>` : '';
+        return `
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:5px;
+             padding:12px;margin-bottom:8px">
+          <div style="display:flex;align-items:flex-start;gap:10px">
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px">
+                <span style="font-size:13px;font-weight:600;color:var(--text)">
+                  ${esc(dev.name || dev.mac)}</span>
+                <span style="font-family:var(--mono);font-size:10px;color:var(--muted)">
+                  ${esc(dev.mac)}</span>
+              </div>
+              ${dev.tvIp
+                ? `<div style="font-size:10px;color:var(--muted);margin-bottom:6px">
+                     TV&nbsp;IP: ${esc(dev.tvIp)}</div>` : ''}
+              <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+                ${groupBadges}${assignCtrl}
+              </div>
+              ${pushRow}
+            </div>
+            <div style="display:flex;gap:4px;flex-shrink:0">
+              <button class="btn-secondary" style="font-size:10px;padding:2px 8px"
+                onclick="amEditDevice('${dev.mac}')">Edit</button>
+              <button class="btn-secondary"
+                style="font-size:10px;padding:2px 8px;color:var(--danger)"
+                onclick="amDeleteDevice('${dev.mac}')">Remove</button>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}`;
+}
+
+function amFillFromSession() {
+  const macData = lastData?.mac;
+  const mac = (typeof macData === 'string') ? macData : macData?.mac;
+  const ip  = document.getElementById('inp-host')?.value;
+  if (mac) { const el = document.getElementById('am-reg-mac');  if (el) el.value = mac; }
+  if (ip)  { const el = document.getElementById('am-reg-ip');   if (el) el.value = ip;  }
+}
+
+async function amRegisterDevice() {
+  const mac  = document.getElementById('am-reg-mac')?.value.trim();
+  const name = document.getElementById('am-reg-name')?.value.trim();
+  const tvIp = document.getElementById('am-reg-ip')?.value.trim();
+  if (!mac)  { alert('TV MAC address is required.'); return; }
+  if (!name) { alert('Device name is required.'); return; }
+  try {
+    const r = await api('/devices', { tvMac: mac, name, ...(tvIp ? { tvIp } : {}) });
+    if (r.error) throw new Error(r.error);
+    document.getElementById('am-reg-mac').value  = '';
+    document.getElementById('am-reg-name').value = '';
+    document.getElementById('am-reg-ip').value   = '';
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amEditDevice(mac) {
+  const dev  = amReg?.devices?.[mac];
+  if (!dev) return;
+  const name = prompt('Device name:', dev.name || '');
+  if (name === null) return;
+  const tvIp = prompt('TV IP address:', dev.tvIp || '');
+  if (tvIp === null) return;
+  try {
+    const r = await fetch('/api/devices/' + mac, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim(), tvIp: tvIp.trim() }),
+    });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amDeleteDevice(mac) {
+  const dev = amReg?.devices?.[mac];
+  if (!confirm(`Remove "${dev?.name || mac}" from the device registry?`)) return;
+  try {
+    const r = await fetch('/api/devices/' + mac, { method: 'DELETE' });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amAssignFromSelect(mac, macId) {
+  const sel = document.getElementById('am-agrp-' + macId);
+  if (!sel || !sel.value) return;
+  try {
+    const r = await api('/devices/' + mac + '/groups', { groupId: sel.value });
+    if (r.error) throw new Error(r.error);
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amUnassignGroup(mac, groupId) {
+  try {
+    const r = await fetch('/api/devices/' + mac + '/groups/' + groupId, { method: 'DELETE' });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amPush(mac, macId) {
+  const sel     = document.getElementById('am-push-' + macId);
+  const groupId = sel?.value;
+  if (!groupId) { alert('Select a group to push.'); return; }
+  const stEl = document.getElementById('am-pst-' + macId);
+  if (stEl) stEl.textContent = 'Pushing…';
+  try {
+    const r = await api('/devices/' + mac + '/push', { groupId });
+    if (r.error) throw new Error(r.error);
+    if (stEl) stEl.innerHTML =
+      `<span class="ok-text">✓ ${r.files?.length ?? '?'} file(s) pushed to "${esc(r.folder)}"</span>`;
+  } catch(e) {
+    if (stEl) stEl.innerHTML = `<span class="error-text">✗ ${esc(e.message)}</span>`;
+    else alert('Push error: ' + e.message);
+  }
 }
 
 // ─── util ────────────────────────────────────────────────────────────────────
@@ -1273,7 +1623,7 @@ document.addEventListener('DOMContentLoaded', () => {
   cacheDiv.className = 'card';
   cacheDiv.id = 'card-cache';
   document.getElementById('scanner-wrap').appendChild(cacheDiv);
-  loadCache();
+  loadAssetManager();
 });
 </script>
 </body>

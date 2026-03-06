@@ -35,6 +35,34 @@ const CACHE_DIR = process.env.NEC_CACHE_DIR
 fs.mkdirSync(CACHE_DIR, { recursive: true });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Registry — groups & device assignments
+// Stored as CACHE_DIR/registry.json:
+//   { groups: { <id> → { name, assets: [sha256, ...] } },
+//     devices: { <mac> → { name, tvIp, playerMac?, groups: [id, ...] } } }
+// The "all" pseudo-group is never stored here — it is computed on demand
+// as every sha256 currently in the cache.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REGISTRY_FILE = path.join(CACHE_DIR, 'registry.json');
+
+function loadRegistry() {
+  try { return JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8')); }
+  catch { return { groups: {}, devices: {} }; }
+}
+
+function saveRegistry(reg) {
+  fs.writeFileSync(REGISTRY_FILE, JSON.stringify(reg, null, 2));
+}
+
+/** Normalise any MAC format to lowercase colon-separated aa:bb:cc:dd:ee:ff. */
+function normalizeMac(mac) {
+  if (!mac) return '';
+  const digits = String(mac).toLowerCase().replace(/[^0-9a-f]/g, '');
+  if (digits.length !== 12) return String(mac).toLowerCase();
+  return digits.match(/.{2}/g).join(':');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Active session store  { id → Session }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -561,6 +589,183 @@ async function handleApi(method, pathname, body, req) {
     return { results };
   }
 
+  // ─── Registry ───────────────────────────────────────────────────────────────
+  // GET /api/registry  — full groups + devices map
+  if (method === 'GET' && pathname === '/api/registry') {
+    return loadRegistry();
+  }
+
+  // ─── Groups ─────────────────────────────────────────────────────────────────
+  // POST /api/groups  { name }
+  if (method === 'POST' && pathname === '/api/groups') {
+    const { name } = body;
+    if (!name || typeof name !== 'string') return { error: 'name required' };
+    const reg = loadRegistry();
+    const id = newId();
+    reg.groups[id] = { name: name.trim(), assets: [] };
+    saveRegistry(reg);
+    return { id, ...reg.groups[id] };
+  }
+
+  // PATCH /api/groups/:id  { name }
+  if (method === 'PATCH' && /^\/api\/groups\/[^/]+$/.test(pathname)) {
+    const id = pathname.split('/')[3];
+    const { name } = body;
+    const reg = loadRegistry();
+    if (!reg.groups[id]) return { error: 'group not found' };
+    if (name) reg.groups[id].name = name.trim();
+    saveRegistry(reg);
+    return { id, ...reg.groups[id] };
+  }
+
+  // DELETE /api/groups/:id
+  if (method === 'DELETE' && /^\/api\/groups\/[^/]+$/.test(pathname)) {
+    const id = pathname.split('/')[3];
+    const reg = loadRegistry();
+    if (!reg.groups[id]) return { error: 'group not found' };
+    delete reg.groups[id];
+    // Cascade: remove this group from all devices
+    for (const dev of Object.values(reg.devices)) {
+      dev.groups = (dev.groups || []).filter(g => g !== id);
+    }
+    saveRegistry(reg);
+    return { ok: true };
+  }
+
+  // POST /api/groups/:id/assets  { hashes: ['sha256', ...] }  — add assets to group
+  if (method === 'POST' && /^\/api\/groups\/[^/]+\/assets$/.test(pathname)) {
+    const id = pathname.split('/')[3];
+    const { hashes } = body;
+    const reg = loadRegistry();
+    if (!reg.groups[id]) return { error: 'group not found' };
+    const set = new Set(reg.groups[id].assets);
+    for (const h of (hashes || [])) set.add(h);
+    reg.groups[id].assets = [...set];
+    saveRegistry(reg);
+    return { id, ...reg.groups[id] };
+  }
+
+  // DELETE /api/groups/:id/assets/:hash  — remove a single asset from a group
+  if (method === 'DELETE' && /^\/api\/groups\/[^/]+\/assets\/[^/]+$/.test(pathname)) {
+    const parts = pathname.split('/');
+    const id = parts[3], hash = parts[5];
+    const reg = loadRegistry();
+    if (!reg.groups[id]) return { error: 'group not found' };
+    reg.groups[id].assets = reg.groups[id].assets.filter(h => h !== hash);
+    saveRegistry(reg);
+    return { id, ...reg.groups[id] };
+  }
+
+  // ─── Devices ─────────────────────────────────────────────────────────────────
+  // GET /api/devices  — list all registered devices
+  if (method === 'GET' && pathname === '/api/devices') {
+    const reg = loadRegistry();
+    return Object.entries(reg.devices).map(([mac, d]) => ({ mac, ...d }));
+  }
+
+  // POST /api/devices  { tvMac, name?, tvIp?, playerMac? }  — register / upsert device
+  if (method === 'POST' && pathname === '/api/devices') {
+    const { tvMac, name, tvIp, playerMac } = body;
+    if (!tvMac) return { error: 'tvMac required' };
+    const mac = normalizeMac(tvMac);
+    const reg = loadRegistry();
+    const existing = reg.devices[mac] || { groups: [] };
+    reg.devices[mac] = {
+      ...existing,
+      name: (name ? name.trim() : null) || existing.name || mac,
+      ...(tvIp      ? { tvIp }                               : {}),
+      ...(playerMac ? { playerMac: normalizeMac(playerMac) } : {}),
+    };
+    saveRegistry(reg);
+    return { mac, ...reg.devices[mac] };
+  }
+
+  // PATCH /api/devices/:mac  { name?, tvIp? }
+  if (method === 'PATCH' && /^\/api\/devices\/[^/]+$/.test(pathname)) {
+    const mac = normalizeMac(pathname.split('/')[3]);
+    const reg = loadRegistry();
+    if (!reg.devices[mac]) return { error: 'device not found' };
+    if (body.name !== undefined) reg.devices[mac].name  = body.name.trim();
+    if (body.tvIp !== undefined) reg.devices[mac].tvIp  = body.tvIp;
+    saveRegistry(reg);
+    return { mac, ...reg.devices[mac] };
+  }
+
+  // DELETE /api/devices/:mac
+  if (method === 'DELETE' && /^\/api\/devices\/[^/]+$/.test(pathname)) {
+    const mac = normalizeMac(pathname.split('/')[3]);
+    const reg = loadRegistry();
+    delete reg.devices[mac];
+    saveRegistry(reg);
+    return { ok: true };
+  }
+
+  // POST /api/devices/:mac/groups  { groupId }  — assign a group to a device
+  if (method === 'POST' && /^\/api\/devices\/[^/]+\/groups$/.test(pathname)) {
+    const mac = normalizeMac(pathname.split('/')[3]);
+    const { groupId } = body;
+    const reg = loadRegistry();
+    if (!reg.devices[mac]) return { error: 'device not found' };
+    if (groupId !== 'all' && !reg.groups[groupId]) return { error: 'group not found' };
+    const set = new Set(reg.devices[mac].groups || []);
+    set.add(groupId);
+    reg.devices[mac].groups = [...set];
+    saveRegistry(reg);
+    return { mac, ...reg.devices[mac] };
+  }
+
+  // DELETE /api/devices/:mac/groups/:groupId  — remove a group assignment from a device
+  if (method === 'DELETE' && /^\/api\/devices\/[^/]+\/groups\/[^/]+$/.test(pathname)) {
+    const parts   = pathname.split('/');
+    const mac     = normalizeMac(parts[3]);
+    const groupId = parts[5];
+    const reg = loadRegistry();
+    if (!reg.devices[mac]) return { error: 'device not found' };
+    reg.devices[mac].groups = (reg.devices[mac].groups || []).filter(g => g !== groupId);
+    saveRegistry(reg);
+    return { mac, ...reg.devices[mac] };
+  }
+
+  // POST /api/devices/:mac/push  { groupId, tvIp? }
+  // Push all assets in a group to a named folder on the device's media player.
+  if (method === 'POST' && /^\/api\/devices\/[^/]+\/push$/.test(pathname)) {
+    const mac = normalizeMac(pathname.split('/')[3]);
+    const { groupId, tvIp: overrideIp } = body;
+    const reg    = loadRegistry();
+    const device = reg.devices[mac];
+    if (!device) return { error: 'device not found' };
+    const tvIP = overrideIp || device.tvIp;
+    if (!tvIP) return { error: 'tvIp required (device has no stored IP)' };
+
+    // Resolve group → list of sha256 hashes
+    const { items: cacheItems } = await cacheList();
+    let hashes;
+    if (groupId === 'all') {
+      hashes = cacheItems.map(i => i.sha256);
+    } else {
+      const grp = reg.groups[groupId];
+      if (!grp) return { error: 'group not found' };
+      hashes = grp.assets;
+    }
+    if (!hashes.length) return { error: 'group has no assets' };
+
+    // Load file data from cache
+    const files = [];
+    for (const hash of hashes) {
+      const item = cacheItems.find(i => i.sha256 === hash);
+      if (!item) continue;
+      const ext  = path.extname(item.originalName);
+      const data = await fs.promises.readFile(cacheFilePath(hash, ext));
+      files.push({ filename: item.displayName, mime: item.mime, data });
+    }
+    if (!files.length) return { error: 'no valid cached files for this group' };
+
+    const groupName = groupId === 'all' ? 'all' : reg.groups[groupId].name;
+    log('info', `Pushing ${files.length} file(s) → "${groupName}" on ${device.name || mac} (${tvIP})`);
+    const result = await pushGroupToPlayer(tvIP, groupName, files);
+    return { ok: true, ...result };
+  }
+
   // POST /api/emergency-upload?tvIP=x.x.x.x&filename=foo.mp4
   return { error: `Unknown endpoint: ${method} ${pathname}` };
 }
@@ -927,7 +1132,8 @@ async function cacheStore(data, originalName, mime) {
 
 async function cacheList() {
   const entries = await fs.promises.readdir(CACHE_DIR);
-  const sidecars = entries.filter(f => f.endsWith('.json'));
+  // Only match sha256-named sidecars — excludes registry.json and any other admin files
+  const sidecars = entries.filter(f => /^[0-9a-f]{64}\.json$/.test(f));
   const items = [];
   for (const sc of sidecars) {
     try {
@@ -1076,6 +1282,64 @@ async function emergencyUploadFiles(tvIP, files) {
 
   log('info', `[emergency-upload] Done — ${uploaded.length} file(s) uploaded`);
   return { ok: true, tvIP, playerIP, folder: FOLDER, files: uploaded };
+}
+
+/**
+ * Push a group's files to a named folder on the media player SD card.
+ * Unlike emergencyUploadFiles, this preserves all other folders — it only
+ * deletes and recreates the one target folder (createFolder handles that).
+ *
+ * Flow:
+ * 1. Power on via NEC 7142 (if needed)
+ * 2. Discover player IP via pjctrl
+ * 3. Wait for player to be reachable
+ * 4. Create/overwrite the named folder (delete → recreate, leaves other folders intact)
+ * 5. Upload all files in order
+ * 6. RSG finalise so the player picks up the new content
+ */
+async function pushGroupToPlayer(tvIP, folderName, files) {
+  // 1. Power on if needed
+  log('info', `[push] Checking power on ${tvIP}:7142`);
+  const sess = await openTcpSession(tvIP, { port: 7142 });
+  try {
+    const pw = await sess.powerStatus(1);
+    if (pw.modeStr !== 'on') {
+      log('info', `[push] Powering on ${tvIP}…`);
+      await sess.powerSet(1, 'on');
+      await new Promise(r => setTimeout(r, 2000));
+    } else {
+      log('info', `[push] TV already on`);
+    }
+  } finally {
+    await sess.close().catch(() => {});
+  }
+
+  // 2. Discover player IP
+  log('info', `[push] Fetching player IP from ${tvIP}`);
+  const playerIP = await getPlayerIP(tvIP);
+  log('info', `[push] Player IP: ${playerIP}`);
+
+  // 3. Wait for player
+  await waitForPlayer(playerIP, 15000);
+  log('info', `[push] Player reachable`);
+
+  // 4. Create (or overwrite) the named folder — navigates into it ready for uploads
+  log('info', `[push] Creating folder "${folderName}"`);
+  await createFolder(playerIP, folderName);
+
+  // 5. Upload all files in order
+  const uploaded = [];
+  for (const { filename, mime, data } of files) {
+    log('info', `[push] Uploading ${filename} (${data.length} bytes)…`);
+    await uploadFileToPlayer(playerIP, data, filename, mime);
+    uploaded.push({ filename, bytes: data.length });
+  }
+
+  // 6. RSG finalise — restarts player so it picks up the new folder contents
+  const clock = Date.now();
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?RSG=${clock}`, 'POST');
+  log('info', `[push] Done — ${uploaded.length} file(s) uploaded to "${folderName}"`);
+  return { tvIP, playerIP, folder: folderName, files: uploaded };
 }
 
 // ─── Media player folder playback ─────────────────────────────────────────────
@@ -1258,7 +1522,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     let body = {};
-    if (method === 'POST' || method === 'PUT') {
+    if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
       body = await readJson(req);
     }
     try {
