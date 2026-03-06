@@ -1489,10 +1489,13 @@ function renderAmDevices(body) {
           const name = gid === 'all' ? 'all' : (groups[gid]?.name || gid);
           const cls  = gid === 'all' ? 'badge-grey' : 'badge-blue';
           return `<span class="badge ${cls}" style="cursor:default">
-            ${esc(name)}
+            <span onclick="amPlayGroup('${dev.tvIp}','${gid}','${macId}')"
+              style="cursor:pointer" title="▶ Play ${esc(name)} now">
+              ${esc(name)}
+            </span>
             <button onclick="amUnassignGroup('${dev.mac}','${gid}')"
               style="background:none;border:none;color:inherit;cursor:pointer;
-              padding:0 0 0 3px;font-size:10px;line-height:1">×</button>
+              padding:0 0 0 3px;font-size:10px;line-height:1" title="Remove">×</button>
           </span>`;
         }).join('');
         const unassigned = ['all', ...allGids].filter(g => !devGids.includes(g));
@@ -1616,6 +1619,22 @@ async function amUnassignGroup(mac, groupId) {
     if (j.error) throw new Error(j.error);
     await loadAssetManager();
   } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amPlayGroup(tvIp, gid, macId) {
+  if (!tvIp) { alert('No TV IP stored for this device.'); return; }
+  const groups = amReg?.groups || {};
+  const folder = gid === 'all' ? 'all' : (groups[gid]?.name || gid);
+  const stEl   = document.getElementById('am-pst-' + macId);
+  if (stEl) stEl.textContent = `Playing "${folder}"…`;
+  try {
+    const r = await api('/player/play', { sessionId, tvIP: tvIp, folder });
+    if (r.error) throw new Error(r.error);
+    if (stEl) stEl.innerHTML = `<span class="ok-text">▶ Playing "${esc(folder)}"</span>`;
+  } catch(e) {
+    if (stEl) stEl.innerHTML = `<span class="error-text">✗ ${esc(e.message)}</span>`;
+    else alert('Play error: ' + e.message);
+  }
 }
 
 async function amPushAll(mac, macId) {
