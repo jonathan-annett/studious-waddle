@@ -1987,6 +1987,33 @@ function waitForPlayer(playerIP, timeoutMs = 15000) {
   });
 }
 
+/**
+ * Poll playerIP:/mmb/filelist.json until the response parses as valid JSON.
+ * More reliable than a TCP-only check: the HTTP daemon can accept connections
+ * before the CGI module is ready, briefly serving HTML error pages.
+ */
+function waitForPlayerReady(playerIP, timeoutMs = 30000) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    function attempt() {
+      playerRequest(playerIP, `/mmb/filelist.json?_=${Date.now()}`, 'GET',
+        null, { referer: `http://${playerIP}/sd_card_viewer.html` })
+        .then(body => {
+          const fixed = body.replace(/,(\s*\])/g, '$1');
+          try { JSON.parse(fixed); resolve(); }        // valid JSON — CGI ready
+          catch { retry(); }                           // HTML/garbage — not ready yet
+        })
+        .catch(() => retry());                         // TCP error — not up yet
+    }
+    function retry() {
+      if (Date.now() >= deadline)
+        return reject(new Error(`Player ${playerIP} CGI not ready within ${timeoutMs}ms`));
+      setTimeout(attempt, 2000);
+    }
+    attempt();
+  });
+}
+
 /** List and delete every top-level entry on the player SD card. */
 async function wipeDrive(playerIP) {
   // Navigate to root before listing (FL=-01 = go up/to root)
@@ -2532,10 +2559,10 @@ async function playFolder(tvIP, folder, session, monitorId, safeInput = SAFE_INP
   const playerIP = await getPlayerIP(tvIP);
   log('info', `[player/play] playerIP=${playerIP}`);
 
-  // Wait for the player's HTTP API to be ready.  It may have just restarted
-  // (e.g. after RSG= from pushGroupToPlayer) and will briefly serve HTML error
-  // pages instead of JSON.
-  await waitForPlayer(playerIP, 20000);
+  // Wait until the player CGI actually serves valid JSON (not just TCP-up).
+  // After RSG= the HTTP daemon accepts TCP connections before the CGI is ready,
+  // so a TCP-only check is not sufficient.
+  await waitForPlayerReady(playerIP, 30000);
 
   // Check folder contents
   const { fileCount } = await getPlayerFolderContents(playerIP, folder);
