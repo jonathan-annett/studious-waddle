@@ -1527,27 +1527,8 @@ function renderAmAssets(body) {
   }
   const allGids = Object.keys(amReg?.groups || {});
 
-  // Upcoming/active sub-events per groupId: groupId → [{ eventName, subEventName, start }]
-  const now = Date.now();
-  const groupUpcoming = {};
-  for (const [, ev] of Object.entries(amReg?.events || {})) {
-    for (const sub of ev.subEvents || []) {
-      if (new Date(sub.end).getTime() <= now) continue; // already ended
-      const entry = { eventName: ev.name, subEventName: sub.name, start: sub.start };
-      (groupUpcoming[sub.groupId] = groupUpcoming[sub.groupId] || []).push(entry);
-    }
-  }
+  const groupUpcoming = buildGroupUpcoming(amReg?.events);
 
-  // Format a local datetime as DD/MM/YY HH:MM
-  function fmtDt(isoStr) {
-    const d = new Date(isoStr);
-    const dd = String(d.getDate()).padStart(2,'0');
-    const mm = String(d.getMonth()+1).padStart(2,'0');
-    const yy = String(d.getFullYear()).slice(2);
-    const hh = String(d.getHours()).padStart(2,'0');
-    const mi = String(d.getMinutes()).padStart(2,'0');
-    return `${dd}/${mm}/${yy} ${hh}:${mi}`;
-  }
 
   const isImage = mime => mime && mime.startsWith('image/');
 
@@ -1594,16 +1575,9 @@ function renderAmAssets(body) {
               onclick="amTagFromSelect('${item.sha256}','${h8}')">Tag</button>` : '';
           // Collect upcoming sub-events that reference a group containing this asset
           const upcomingRefs = (assetGroups[item.sha256] || [])
-            .flatMap(gid => groupUpcoming[gid] || [])
-            .sort((a, b) => new Date(a.start) - new Date(b.start));
-          const canDelete = upcomingRefs.length === 0;
-          let deleteTitle = '';
-          if (!canDelete) {
-            const first = upcomingRefs[0];
-            const rest  = upcomingRefs.length - 1;
-            deleteTitle = `in use @ ${fmtDt(first.start)}` +
-              (rest > 0 ? ` + ${rest} more event${rest > 1 ? 's' : ''}` : '');
-          }
+            .flatMap(gid => groupUpcoming[gid] || []);
+          const canDelete  = upcomingRefs.length === 0;
+          const deleteTitle = upcomingTooltip(upcomingRefs);
           const deleteBtn = canDelete
             ? `<button class="btn-secondary"
                 style="font-size:9px;padding:1px 6px;color:var(--danger);margin-top:4px;align-self:flex-start"
@@ -1703,7 +1677,8 @@ async function amRemoveFromGroup(hash, groupId) {
 // ── Groups tab ────────────────────────────────────────────────────────────────
 
 function renderAmGroups(body) {
-  const groups = Object.entries(amReg?.groups || {});
+  const groups       = Object.entries(amReg?.groups || {});
+  const groupUpcoming = buildGroupUpcoming(amReg?.events);
   body.innerHTML = `
   <div class="form-row" style="margin-bottom:14px">
     <div class="form-group">
@@ -1723,10 +1698,23 @@ function renderAmGroups(body) {
   ${groups.length === 0
     ? '<div style="color:var(--muted);font-size:12px;margin-top:10px">No custom groups yet.</div>'
     : groups.map(([id, grp]) => {
-        const count = grp.assets.length;
+        const count      = grp.assets.length;
+        const refs       = groupUpcoming[id] || [];
+        const canDelete  = refs.length === 0;
+        const tooltip    = upcomingTooltip(refs);
+        const deleteBtn  = canDelete
+          ? `<button class="btn-secondary" style="font-size:10px;padding:2px 8px;color:var(--danger)"
+               onclick="amDeleteGroup('${id}')">Delete</button>`
+          : `<span title="${esc(tooltip)}">
+               <button class="btn-secondary" disabled
+                 style="font-size:10px;padding:2px 8px;color:var(--muted);
+                        opacity:.45;cursor:not-allowed;pointer-events:none">Delete</button>
+             </span>
+             <span style="font-family:var(--mono);font-size:9px;color:var(--muted)"
+               title="${esc(tooltip)}">🔒 ${esc(tooltip)}</span>`;
         return `
         <div style="display:flex;align-items:center;gap:8px;padding:7px 0;
-             border-bottom:1px solid var(--border)">
+             border-bottom:1px solid var(--border);flex-wrap:wrap">
           <span class="badge badge-blue"
             style="min-width:0;max-width:120px;overflow:hidden;text-overflow:ellipsis;
             white-space:nowrap" title="${esc(grp.name)}">${esc(grp.name)}</span>
@@ -1739,8 +1727,7 @@ function renderAmGroups(body) {
             border-radius:4px;width:150px">
           <button class="btn-secondary" style="font-size:10px;padding:2px 8px"
             onclick="amRenameGroup('${id}')">Rename</button>
-          <button class="btn-secondary" style="font-size:10px;padding:2px 8px;color:var(--danger)"
-            onclick="amDeleteGroup('${id}')">Delete</button>
+          ${deleteBtn}
         </div>`;
       }).join('')}`;
 }
@@ -2401,6 +2388,39 @@ function todayAtHour(h) {
 }
 
 // ─── util ────────────────────────────────────────────────────────────────────
+
+function fmtDt(isoStr) {
+  const d = new Date(isoStr);
+  const dd = String(d.getDate()).padStart(2,'0');
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  const yy = String(d.getFullYear()).slice(2);
+  const hh = String(d.getHours()).padStart(2,'0');
+  const mi = String(d.getMinutes()).padStart(2,'0');
+  return `${dd}/${mm}/${yy} ${hh}:${mi}`;
+}
+
+/** Build groupId → [{ eventName, subEventName, start }] for sub-events not yet ended. */
+function buildGroupUpcoming(events) {
+  const now = Date.now();
+  const map = {};
+  for (const [, ev] of Object.entries(events || {})) {
+    for (const sub of ev.subEvents || []) {
+      if (new Date(sub.end).getTime() <= now) continue;
+      (map[sub.groupId] = map[sub.groupId] || [])
+        .push({ eventName: ev.name, subEventName: sub.name, start: sub.start });
+    }
+  }
+  return map;
+}
+
+/** Given an array of upcoming refs, return the tooltip string or '' if none. */
+function upcomingTooltip(refs) {
+  if (!refs.length) return '';
+  const sorted = [...refs].sort((a, b) => new Date(a.start) - new Date(b.start));
+  const rest   = sorted.length - 1;
+  return `in use @ ${fmtDt(sorted[0].start)}` +
+    (rest > 0 ? ` + ${rest} more event${rest > 1 ? 's' : ''}` : '');
+}
 
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
