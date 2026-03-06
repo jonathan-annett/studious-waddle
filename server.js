@@ -2532,6 +2532,11 @@ async function playFolder(tvIP, folder, session, monitorId, safeInput = SAFE_INP
   const playerIP = await getPlayerIP(tvIP);
   log('info', `[player/play] playerIP=${playerIP}`);
 
+  // Wait for the player's HTTP API to be ready.  It may have just restarted
+  // (e.g. after RSG= from pushGroupToPlayer) and will briefly serve HTML error
+  // pages instead of JSON.
+  await waitForPlayer(playerIP, 20000);
+
   // Check folder contents
   const { fileCount } = await getPlayerFolderContents(playerIP, folder);
   log('info', `[player/play] fileCount=${fileCount}`);
