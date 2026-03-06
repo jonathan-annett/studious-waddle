@@ -2,18 +2,26 @@
 
 NEC_CACHE_DIR=/server/cache
 NEC_SUBNET=192.168.100
+DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ "$1" = "--dev" ]; then
   echo "[run] Dev mode — git pull → node → repeat on exit"
   while true; do
-    echo "[run] Pulling latest from origin..."
-    git pull
+    if [ -f "$DIR/.pin" ]; then
+      REF="$(cat "$DIR/.pin")"
+      echo "[run] Rollback pin found — fetching and checking out ${REF}..."
+      git -C "$DIR" fetch origin
+      git -C "$DIR" checkout "$REF"
+    else
+      echo "[run] Pulling latest..."
+      git -C "$DIR" pull
+    fi
     echo "[run] Starting server..."
-    NEC_CACHE_DIR=$NEC_CACHE_DIR NEC_SUBNET=$NEC_SUBNET node server.js 4000
+    NEC_CACHE_DIR=$NEC_CACHE_DIR NEC_SUBNET=$NEC_SUBNET node "$DIR/server.js" 4000
     EXIT=$?
     echo "[run] Server exited (code $EXIT). Restarting in 2s..."
     sleep 2
   done
 else
-  NEC_CACHE_DIR=$NEC_CACHE_DIR NEC_SUBNET=$NEC_SUBNET node server.js 4000
+  NEC_CACHE_DIR=$NEC_CACHE_DIR NEC_SUBNET=$NEC_SUBNET node "$DIR/server.js" 4000
 fi

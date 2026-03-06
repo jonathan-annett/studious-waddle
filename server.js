@@ -26,10 +26,12 @@ import {
   encodeWeekMask,
 } from './nec-protocol.js';
 
-const PORT      = parseInt(process.argv[2] ?? '3000', 10);
-const CACHE_DIR = process.env.NEC_CACHE_DIR
+const PORT        = parseInt(process.argv[2] ?? '3000', 10);
+const PROJECT_DIR = path.dirname(new URL(import.meta.url).pathname);
+const CACHE_DIR   = process.env.NEC_CACHE_DIR
   ? path.resolve(process.env.NEC_CACHE_DIR)
-  : path.join(path.dirname(new URL(import.meta.url).pathname), 'cache');
+  : path.join(PROJECT_DIR, 'cache');
+const PIN_FILE    = path.join(PROJECT_DIR, '.pin'); // written by /api/rollback, read by ./run --dev
 
 // Ensure cache directory exists
 fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -995,11 +997,25 @@ async function handleApi(method, pathname, body, req) {
 
   // POST /api/restart
   // Exits the process cleanly so the `./run --dev` loop can git pull and restart.
-  // This is the deploy trigger: push to GitHub, then hit this endpoint from the dev machine.
+  // Also clears any rollback pin so the loop returns to tracking latest.
   if (method === 'POST' && pathname === '/api/restart') {
+    try { fs.unlinkSync(PIN_FILE); } catch { /* no pin file — that's fine */ }
     log('info', '[restart] Exiting for git-pull restart — goodbye');
-    setTimeout(() => process.exit(0), 300); // let response flush first
+    setTimeout(() => process.exit(0), 300);
     return { ok: true, message: 'Server exiting — loop will git pull and restart' };
+  }
+
+  // POST /api/rollback  { ref }
+  // Writes a git ref (tag or commit hash) to .pin then exits cleanly.
+  // The `./run --dev` loop reads .pin, does `git fetch && git checkout <ref>`, and restarts.
+  // Use POST /api/restart to clear the pin and return to tracking latest.
+  if (method === 'POST' && pathname === '/api/rollback') {
+    const { ref } = body;
+    if (!ref) return { error: 'ref required — pass a tag name or commit hash' };
+    fs.writeFileSync(PIN_FILE, ref.trim());
+    log('info', `[rollback] Pinned to "${ref}" — exiting for loop restart`);
+    setTimeout(() => process.exit(0), 300);
+    return { ok: true, message: `Pinned to "${ref}" — server restarting on that ref` };
   }
 
   // POST /api/emergency-upload?tvIP=x.x.x.x&filename=foo.mp4
