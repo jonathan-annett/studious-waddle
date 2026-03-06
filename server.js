@@ -47,7 +47,7 @@ const REGISTRY_FILE = path.join(CACHE_DIR, 'registry.json');
 
 function loadRegistry() {
   try { return JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8')); }
-  catch { return { groups: {}, devices: {} }; }
+  catch { return { groups: {}, devices: {}, players: {} }; }
 }
 
 function saveRegistry(reg) {
@@ -589,6 +589,102 @@ async function handleApi(method, pathname, body, req) {
     return { results };
   }
 
+  // POST /api/device-online  { up, port, mac, ip }
+  // Called by a DHCP lease monitor whenever a device appears on the LAN.
+  // Classifies the device (known TV / unknown TV / player / suspicious) and
+  // broadcasts a typed WebSocket event to all connected browsers.
+  if (method === 'POST' && pathname === '/api/device-online') {
+    const { mac: rawMac, ip, port: ethPort } = body;
+    if (!rawMac || !ip) return { error: 'mac and ip required' };
+    const mac = normalizeMac(rawMac);
+    const reg = loadRegistry();
+
+    // ── 1. Known media player — silently acknowledge, update IP if changed ──
+    if (reg.players?.[mac]) {
+      log('info', `[device-online] Known player ${mac} (${ip}) — ignored`);
+      if (reg.players[mac].ip !== ip) {
+        reg.players[mac].ip = ip;
+        saveRegistry(reg);
+      }
+      wsBroadcast({ type: 'player-online', mac, ip });
+      return { ok: true, category: 'player', mac, ip };
+    }
+
+    // ── 2. Known TV ──────────────────────────────────────────────────────────
+    if (reg.devices[mac]) {
+      const device = reg.devices[mac];
+      // Keep stored IP current (DHCP can reassign)
+      if (device.tvIp !== ip) {
+        reg.devices[mac].tvIp = ip;
+        saveRegistry(reg);
+        log('info', `[device-online] Known TV "${device.name}" (${mac}) — IP updated ${device.tvIp} → ${ip}`);
+      } else {
+        log('info', `[device-online] Known TV "${device.name}" (${mac}) at ${ip}`);
+      }
+
+      // Interrogate power state
+      let power = 'unknown';
+      try {
+        const probe = await probeTvNec(ip, 6000);
+        if (probe.ok) power = probe.power;
+      } catch (e) {
+        log('warn', `[device-online] Power query failed for ${mac}: ${e.message}`);
+      }
+
+      wsBroadcast({ type: 'device-online', category: 'tv', mac, name: device.name, ip, power });
+      return { ok: true, category: 'tv', mac, name: device.name, ip, power };
+    }
+
+    // ── 3. Unknown device — probe to classify ───────────────────────────────
+    log('info', `[device-online] Unknown device ${mac} (${ip}) — probing…`);
+
+    // 3a. Try NEC port 7142
+    const tvProbe = await probeTvNec(ip, 5000);
+    if (tvProbe.ok) {
+      const name = tvProbe.model
+        ? `TV – ${tvProbe.model} (${ip})`
+        : `TV (${ip})`;
+      const reg2 = loadRegistry();           // reload to avoid clobbering concurrent writes
+      if (!reg2.players)  reg2.players  = {};
+      if (!reg2.devices)  reg2.devices  = {};
+      reg2.devices[mac] = {
+        name,
+        tvIp: ip,
+        groups: [],
+        discoveredAt: new Date().toISOString(),
+        ...(tvProbe.model  ? { model:  tvProbe.model  } : {}),
+        ...(tvProbe.serial ? { serial: tvProbe.serial } : {}),
+      };
+      saveRegistry(reg2);
+      log('info', `[device-online] New TV discovered: "${name}" MAC=${mac}`);
+      wsBroadcast({
+        type: 'device-discovered', category: 'tv',
+        mac, name, ip,
+        power:  tvProbe.power,
+        model:  tvProbe.model  ?? null,
+        serial: tvProbe.serial ?? null,
+      });
+      return { ok: true, category: 'tv', discovered: true, mac, name, ip, power: tvProbe.power };
+    }
+
+    // 3b. Try player port 80
+    const isPlayer = await probePlayerHttp(ip, 4000);
+    if (isPlayer) {
+      const reg2 = loadRegistry();
+      if (!reg2.players) reg2.players = {};
+      reg2.players[mac] = { ip, firstSeen: new Date().toISOString() };
+      saveRegistry(reg2);
+      log('info', `[device-online] New player discovered: MAC=${mac} IP=${ip}`);
+      wsBroadcast({ type: 'device-discovered', category: 'player', mac, ip });
+      return { ok: true, category: 'player', discovered: true, mac, ip };
+    }
+
+    // 3c. Neither — suspicious / unrecognised
+    log('warn', `[device-online] Suspicious device: MAC=${mac} IP=${ip} port=${ethPort ?? '?'}`);
+    wsBroadcast({ type: 'device-suspicious', mac, ip, port: ethPort ?? null });
+    return { ok: true, category: 'unknown', mac, ip };
+  }
+
   // ─── Registry ───────────────────────────────────────────────────────────────
   // GET /api/registry  — full groups + devices map
   if (method === 'GET' && pathname === '/api/registry') {
@@ -904,6 +1000,95 @@ async function scanSubnet(subnet, port, timeoutMs) {
   }));
 
   return enriched;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Device classification probes  (used by /api/device-online)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Try to open a NEC 7142 session and query power/model/serial.
+ * Returns { ok: true, power, model, serial } on success, { ok: false } on any failure.
+ * The entire attempt is capped at timeoutMs.
+ */
+async function probeTvNec(ip, timeoutMs = 5000) {
+  let sess;
+  try {
+    sess = await Promise.race([
+      openTcpSession(ip, { port: 7142 }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('nec-timeout')), timeoutMs)),
+    ]);
+
+    const query = (fn) => Promise.race([
+      fn(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('nec-timeout')), 2500)),
+    ]);
+
+    const result = { ok: true, power: 'unknown', model: null, serial: null };
+
+    try { const pw = await query(() => sess.powerStatus(1));
+          result.power = pw.modeStr ?? 'unknown'; } catch { /* best-effort */ }
+    try { const m  = await query(() => sess.modelNameRead(1));
+          result.model = m.model ?? m.raw ?? null; } catch { /* best-effort */ }
+    try { const s  = await query(() => sess.serialRead(1));
+          result.serial = s.serial ?? s.raw ?? null; } catch { /* best-effort */ }
+
+    return result;
+  } catch {
+    return { ok: false };
+  } finally {
+    if (sess) await sess.close().catch(() => {});
+  }
+}
+
+/**
+ * Try to reach the NEC media player HTTP API on port 80.
+ * Fetches /mmb/filelist.json — the firmware always returns a JSON object here
+ * (even when the SD card is empty).  Returns true if the host responds with
+ * a recognisable player response, false on error or timeout.
+ */
+function probePlayerHttp(ip, timeoutMs = 4000) {
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
+
+    const timer = setTimeout(() => finish(false), timeoutMs);
+
+    const req = http.request(
+      {
+        host: ip, port: 80,
+        path: `/mmb/filelist.json?_=${Date.now()}`,
+        method: 'GET',
+        headers: {
+          'accept': 'application/json, */*',
+          'x-requested-with': 'XMLHttpRequest',
+          'referer': `http://${ip}/sd_card_viewer.html`,
+        },
+        insecureHTTPParser: true,
+      },
+      res => {
+        clearTimeout(timer);
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          const body = Buffer.concat(chunks).toString('utf8');
+          const fixed = body.replace(/,(\s*\])/g, '$1');
+          try {
+            const json = JSON.parse(fixed);
+            // filelist.json always has dir_path or fileinfo on a real player
+            finish(json.dir_path !== undefined || Array.isArray(json.fileinfo));
+          } catch {
+            // If the response was non-empty the host is probably a player with
+            // a firmware quirk — count it as a positive identification.
+            finish(body.trim().length > 0);
+          }
+        });
+        res.on('error', () => { clearTimeout(timer); finish(false); });
+      }
+    );
+    req.on('error', () => { clearTimeout(timer); finish(false); });
+    req.end();
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
