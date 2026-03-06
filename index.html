@@ -1510,17 +1510,8 @@ function renderAmDevices(body) {
         const pushRow = devGids.length ? `
           <div style="display:flex;gap:6px;align-items:center;margin-top:8px;
                padding-top:8px;border-top:1px solid var(--border)">
-            <span style="font-size:10px;color:var(--muted)">Push group:</span>
-            <select id="am-push-${macId}"
-              style="font-size:10px;padding:2px 4px;background:var(--bg-input);
-              color:var(--text);border:1px solid var(--border);border-radius:3px">
-              ${devGids.map(g => {
-                const n = g === 'all' ? 'all' : (groups[g]?.name || g);
-                return `<option value="${g}">${esc(n)}</option>`;
-              }).join('')}
-            </select>
             <button class="btn-primary" style="font-size:10px;padding:2px 10px"
-              onclick="amPush('${dev.mac}','${macId}')">⬆ Push</button>
+              onclick="amPushAll('${dev.mac}','${macId}')">⬆ Push all groups</button>
             <span id="am-pst-${macId}" style="font-size:10px;color:var(--muted)"></span>
           </div>` : '';
         return `
@@ -1627,17 +1618,20 @@ async function amUnassignGroup(mac, groupId) {
   } catch(e) { alert('Error: ' + e.message); }
 }
 
-async function amPush(mac, macId) {
-  const sel     = document.getElementById('am-push-' + macId);
-  const groupId = sel?.value;
-  if (!groupId) { alert('Select a group to push.'); return; }
+async function amPushAll(mac, macId) {
   const stEl = document.getElementById('am-pst-' + macId);
-  if (stEl) stEl.textContent = 'Pushing…';
+  if (stEl) stEl.textContent = 'Pushing all groups…';
   try {
-    const r = await api('/devices/' + mac + '/push', { groupId });
+    const r = await api('/devices/' + mac + '/push-all', {});
     if (r.error) throw new Error(r.error);
-    if (stEl) stEl.innerHTML =
-      `<span class="ok-text">✓ ${r.files?.length ?? '?'} file(s) pushed to "${esc(r.folder)}"</span>`;
+    const lines = (r.results || []).map(res => {
+      if (res.status === 'pushed')
+        return `<span class="ok-text">✓ ${esc(res.folder)} (${res.files?.length ?? '?'} file(s))</span>`;
+      if (res.status === 'up-to-date')
+        return `<span class="ok-text">= ${esc(res.folder)}</span>`;
+      return `<span style="color:var(--muted)">⚠ ${esc(res.folder)}: ${esc(res.reason || res.status)}</span>`;
+    });
+    if (stEl) stEl.innerHTML = lines.join(' &nbsp;·&nbsp; ') || '<span class="ok-text">✓ done</span>';
   } catch(e) {
     if (stEl) stEl.innerHTML = `<span class="error-text">✗ ${esc(e.message)}</span>`;
     else alert('Push error: ' + e.message);

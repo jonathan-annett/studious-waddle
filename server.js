@@ -839,6 +839,120 @@ async function handleApi(method, pathname, body, req) {
     return { mac, ...reg.devices[mac] };
   }
 
+  // POST /api/devices/:mac/push-all  { tvIp? }
+  // Push every assigned group to the device's media player in one shot.
+  // Pre-inspects each folder — skips if file set is already up-to-date.
+  if (method === 'POST' && /^\/api\/devices\/[^/]+\/push-all$/.test(pathname)) {
+    const mac = normalizeMac(pathname.split('/')[3]);
+    const { tvIp: overrideIp } = body;
+    const reg    = loadRegistry();
+    const device = reg.devices[mac];
+    if (!device) return { error: 'device not found' };
+    const tvIP = overrideIp || device.tvIp;
+    if (!tvIP) return { error: 'tvIp required (device has no stored IP)' };
+
+    const devGids = device.groups || [];
+    if (!devGids.length) return { error: 'device has no assigned groups' };
+
+    const { items: cacheItems } = await cacheList();
+
+    // Power on TV once
+    log('info', `[push-all] Checking power on ${tvIP}:7142`);
+    const sess = await openTcpSession(tvIP, { port: 7142 });
+    try {
+      const pw = await sess.powerStatus(1);
+      if (pw.modeStr !== 'on') {
+        log('info', `[push-all] Powering on ${tvIP}…`);
+        await sess.powerSet(1, 'on');
+        await new Promise(r => setTimeout(r, 2000));
+      } else {
+        log('info', `[push-all] TV already on`);
+      }
+    } finally {
+      await sess.close().catch(() => {});
+    }
+
+    // Discover player IP once
+    log('info', `[push-all] Fetching player IP from ${tvIP}`);
+    const playerIP = await getPlayerIP(tvIP);
+    log('info', `[push-all] Player IP: ${playerIP}`);
+
+    // Wait for player once
+    await waitForPlayer(playerIP, 15000);
+    log('info', `[push-all] Player reachable`);
+
+    const results = [];
+    let anyPushed = false;
+
+    for (const groupId of devGids) {
+      const grp       = reg.groups[groupId];
+      const groupName = grp?.name || groupId;
+
+      // Resolve hashes for this group
+      const hashes = grp?.assets || [];
+      if (!hashes.length) {
+        results.push({ groupId, folder: groupName, status: 'skipped', reason: 'group has no assets' });
+        continue;
+      }
+
+      // Load file data from cache
+      const files = [];
+      for (const hash of hashes) {
+        const item = cacheItems.find(i => i.sha256 === hash);
+        if (!item) continue;
+        const ext  = path.extname(item.originalName);
+        const data = await fs.promises.readFile(cacheFilePath(hash, ext));
+        files.push({ filename: item.displayName, mime: item.mime, data });
+      }
+      if (!files.length) {
+        results.push({ groupId, folder: groupName, status: 'skipped', reason: 'no valid cached files' });
+        continue;
+      }
+
+      // Pre-inspect folder to check if it's already up-to-date
+      log('info', `[push-all] Checking folder "${groupName}"…`);
+      const check = await checkPlayerFolder(playerIP, groupName);
+      const wantNames = files.map(f => f.filename).sort();
+      const haveNames = check.fileNames.slice().sort();
+      const upToDate  = check.exists &&
+                        wantNames.length === haveNames.length &&
+                        wantNames.every((n, i) => n === haveNames[i]);
+
+      if (upToDate) {
+        log('info', `[push-all] "${groupName}" already up-to-date — skipping`);
+        results.push({ groupId, folder: groupName, status: 'up-to-date' });
+        continue;
+      }
+
+      // Create/overwrite folder and upload files
+      log('info', `[push-all] Pushing ${files.length} file(s) → "${groupName}"`);
+      await createFolder(playerIP, groupName);   // navigates into folder
+
+      const pushed = [];
+      for (const { filename, mime, data } of files) {
+        log('info', `[push-all]   Uploading ${filename} (${data.length} bytes)…`);
+        await uploadFileToPlayer(playerIP, data, filename, mime);
+        pushed.push(filename);
+      }
+
+      // Return to root before processing next folder
+      await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
+
+      results.push({ groupId, folder: groupName, status: 'pushed', files: pushed });
+      anyPushed = true;
+    }
+
+    // Single RSG to commit all uploads (only if we actually pushed something)
+    if (anyPushed) {
+      const clock = Date.now();
+      await playerRequest(playerIP, `/cgi-bin/cgictrl?RSG=${clock}`, 'POST');
+      log('info', `[push-all] RSG sent — player will reload content`);
+    }
+
+    log('info', `[push-all] Done — ${results.length} group(s) processed`);
+    return { ok: true, tvIP, playerIP, results };
+  }
+
   // POST /api/devices/:mac/push  { groupId, tvIp? }
   // Push all assets in a group to a named folder on the device's media player.
   if (method === 'POST' && /^\/api\/devices\/[^/]+\/push$/.test(pathname)) {
@@ -1231,24 +1345,88 @@ async function wipeDrive(playerIP) {
   }
 }
 
-/** Create a folder on the player SD card using the CGI navigation sequence. */
+/** Create a folder on the player SD card using the CGI navigation sequence.
+ *  Navigates into the newly created folder so the caller can start uploading immediately.
+ *  Returns the folder's index in the root filelist (0-based).
+ */
 async function createFolder(playerIP, folderName) {
-  const steps = [
-    // Navigate to root (FL=-01 = go up; from root this is a no-op but ensures known state)
-    { path: `/cgi-bin/cgictrl?FL=-01`,                               method: 'POST' },
-    // Attempt to delete the folder if it already exists (does nothing if absent)
-    { path: `/cgi-bin/cgictrl?FD=${encodeURIComponent(folderName)}`, method: 'POST' },
-    // Create fresh folder at root
-    { path: `/cgi-bin/cgictrl?FM=`,                                  method: 'POST' },
-    { path: `/cgi-bin/cgictrl?FC=${encodeURIComponent(folderName)}`, method: 'POST' },
-    // Verify listing then navigate into the new folder ready for uploads
-    { path: `/mmb/filelist.json?_=${Date.now()}`,                    method: 'GET'  },
-    { path: `/cgi-bin/cgictrl?FL=000`,                               method: 'POST' },
-  ];
-  for (const { path, method } of steps) {
-    const text = await playerRequest(playerIP, path, method);
-    log('info', `  createFolder ${path} → ${text.slice(0, 40)}`);
-  }
+  // 1. Navigate to root
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
+  log('info', `  createFolder: navigated to root`);
+
+  // 2. Delete existing folder of the same name (no-op if absent — firmware ignores it)
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?FD=${encodeURIComponent(folderName)}`, 'POST');
+  log('info', `  createFolder: attempted delete of "${folderName}"`);
+
+  // 3. Enter file manager mode (required before FC=)
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?FM=`, 'POST');
+  log('info', `  createFolder: entered file manager mode`);
+
+  // 4. Create the folder
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?FC=${encodeURIComponent(folderName)}`, 'POST');
+  log('info', `  createFolder: created "${folderName}"`);
+
+  // 5. Read the updated filelist to locate the actual index of the new folder
+  const raw = await playerRequest(playerIP, `/mmb/filelist.json?_=${Date.now()}`, 'GET');
+  const fixed = raw.replace(/,(\s*\])/g, '$1');
+  let fileinfo = [];
+  try { ({ fileinfo } = JSON.parse(fixed)); } catch { /* leave fileinfo empty */ }
+
+  const idx = (fileinfo || []).findIndex(f => f.name === folderName && f.type === 0);
+  if (idx < 0) throw new Error(`createFolder: "${folderName}" not found in filelist after creation`);
+
+  const idxStr = String(idx).padStart(3, '0');
+  log('info', `  createFolder: "${folderName}" is at index ${idx} — navigating in (FL=${idxStr})`);
+
+  // 6. Navigate into the folder (caller can now upload directly)
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=${idxStr}`, 'POST');
+
+  return idx;
+}
+
+/**
+ * Inspect the contents of a named folder on the player SD card — read-only, no modifications.
+ * Returns { exists: boolean, fileNames: string[] }
+ *
+ * Sequence:
+ *   FL=-01        → go to root
+ *   filelist.json → read root entries, locate folderName (type === 0)
+ *   FL=nnn        → navigate into folder
+ *   filelist.json → read folder contents
+ *   FL=-01        → return to root
+ */
+async function checkPlayerFolder(playerIP, folderName) {
+  // Navigate to root
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
+
+  // Read root filelist
+  const rawRoot = await playerRequest(playerIP, `/mmb/filelist.json?_=${Date.now()}`, 'GET');
+  const fixedRoot = rawRoot.replace(/,(\s*\])/g, '$1');
+  let rootInfo = [];
+  try { ({ fileinfo: rootInfo } = JSON.parse(fixedRoot)); } catch { /* leave empty */ }
+
+  // Find the folder by name
+  const idx = (rootInfo || []).findIndex(f => f.name === folderName && f.type === 0);
+  if (idx < 0) return { exists: false, fileNames: [] };
+
+  // Navigate into folder
+  const idxStr = String(idx).padStart(3, '0');
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=${idxStr}`, 'POST');
+
+  // Read folder filelist
+  const rawFolder = await playerRequest(playerIP, `/mmb/filelist.json?_=${Date.now()}`, 'GET');
+  const fixedFolder = rawFolder.replace(/,(\s*\])/g, '$1');
+  let folderInfo = [];
+  try { ({ fileinfo: folderInfo } = JSON.parse(fixedFolder)); } catch { /* leave empty */ }
+
+  const fileNames = (folderInfo || [])
+    .filter(f => f.name !== '..' && f.type !== 0)
+    .map(f => f.name);
+
+  // Return to root
+  await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
+
+  return { exists: true, fileNames };
 }
 
 /**
