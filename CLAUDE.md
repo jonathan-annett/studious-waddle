@@ -114,12 +114,18 @@ The correct sequence to switch the display to a named folder:
 
 1. **Check folder contents** — read filelist, abort if empty
 2. **Decide interval** — 99999s (infinite) if 1 file, user-configured (default 30s) if multiple
-3. **Read current TV input** — if already on MP (`0x87`), bounce to restore input first (800ms delay)  
+3. **Read current TV input** — if already on MP (`0x87`), bounce to restore input first (800ms delay)
    This is mandatory — the player won't pick up a new folder without an input bounce
 4. **Set AutoPlay folder** — `V=S,2B,...`
 5. **Set interval** — `V=S,22,...`
 6. **Restart player** — `RSG=<clock>`
 7. **Switch TV input to MP** — `vcpSet(monitorId, 0x00, 0x60, 0x87)`
+8. **Clear autoplay startup config** — 3 seconds later (fire-and-forget): `V=S,2A,2,0,0,%00,`
+
+Step 8 is intentional: `RSG=` has already committed the folder path and started playback.
+Clearing `V=S,2A` afterwards only affects the player's *next* reboot — the running slideshow is
+unaffected. This prevents the firmware from auto-restarting the last folder if staff manually
+change content via the NEC web UI, while still allowing the server to re-trigger via `playFolder()`.
 
 This is all implemented in `playFolder()` in server.js.
 

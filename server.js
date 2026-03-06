@@ -2403,6 +2403,18 @@ async function playFolder(tvIP, folder, session, monitorId, restoreInput = 0x11,
       const r = await activeSess.vcpSet(activeMid, 0x00, 0x60, MEDIA_PLAYER_INPUT);
       log('info', `[player/play] input switch to MP -> ${JSON.stringify(r)}`);
     }
+
+    // Clear the autoplay startup config after the slideshow is running.
+    // RSG= has already committed V=S,2B/2A and started playback — clearing now only
+    // affects what the player does on its *next* reboot, not the running slideshow.
+    // This prevents the firmware from auto-restarting the last scheduled folder if
+    // staff manually change content via the NEC web UI or the player reboots unexpectedly.
+    const _playerIPForClear = playerIP;
+    setTimeout(() => {
+      playerRequest(_playerIPForClear, `/cgi-bin/cgictrl?V=S,2A,2,0,0,%00,`, 'POST')
+        .then(() => log('info', `[player/play] autoplay startup config cleared — slideshow running freely`))
+        .catch(e => log('warn', `[player/play] autoplay clear failed (non-fatal): ${e.message}`));
+    }, 3000);
   } finally {
     if (tempSession) {
       await tempSession.close().catch(() => {});
