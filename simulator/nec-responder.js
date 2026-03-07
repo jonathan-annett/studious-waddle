@@ -337,6 +337,12 @@ export function createNecServer(device, { port = 7142, onLog } = {}) {
   const log = (msg) => onLog?.(`[NEC ${device.name || device.id}] ${msg}`);
 
   const server = net.createServer((socket) => {
+    // Simulate cable disconnected: reject new connections immediately
+    if (device.connected === false) {
+      socket.destroy();
+      return;
+    }
+
     log(`client connected from ${socket.remoteAddress}:${socket.remotePort}`);
     let rxBuf = Buffer.alloc(0);
 

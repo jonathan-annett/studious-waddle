@@ -35,7 +35,8 @@ const config = {
   necPort:          rawCfg.config?.necPort          ?? 7142,
   tvHttpPort:       rawCfg.config?.tvHttpPort       ?? 80,
   playerHttpPort:   rawCfg.config?.playerHttpPort   ?? 80,
-  server:           rawCfg.config?.server           ?? "127.0.0.1"
+  server:           rawCfg.config?.server           ?? "127.0.0.1",
+  routerUrl:        rawCfg.config?.routerUrl        ?? null,
 };
 
 // Merge devices from JSON into live state objects
@@ -46,6 +47,7 @@ const devices = (rawCfg.devices || []).map(d => ({
   vcpValues:   {},
   emergency:   false,
   replyDelayMs: d.replyDelayMs ?? 5,
+  connected:   true,   // simulates CAT5 cable plugged in
   // player state is initialised by createPlayerHttpServer
   player: null,
 }));
@@ -72,6 +74,62 @@ function log(msg) {
   if (logLines.length > MAX_LOG_LINES) logLines.shift();
   process.stdout.write(line + '\n');
   broadcast({ type: 'log', line });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Router notification — POST /api/device-online
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Notify the router that a device has come online or gone offline.
+ * Simulates the same notification that real NEC hardware triggers
+ * when a CAT5 cable is connected/disconnected or the device powers up.
+ *
+ * @param {object} device - device state object
+ * @param {boolean} up    - true = cable connected / device online, false = offline
+ */
+function notifyRouter(device, up = true) {
+  if (!config.routerUrl) return;
+
+  const body = JSON.stringify({
+    mac:  device.mac,
+    ip:   device.tvIP,
+    ...(up ? {} : { up: false }),
+  });
+
+  const url = new URL('/api/device-online', config.routerUrl);
+  const opts = {
+    hostname: url.hostname,
+    port:     url.port || 80,
+    path:     url.pathname,
+    method:   'POST',
+    headers:  { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    timeout:  5000,
+  };
+
+  const req = http.request(opts, (res) => {
+    let data = '';
+    res.on('data', c => data += c);
+    res.on('end', () => {
+      try {
+        const reply = JSON.parse(data);
+        log(`[router] ${up ? 'online' : 'offline'} notification for ${device.name}: ${reply.category || 'ok'}`);
+      } catch {
+        log(`[router] ${up ? 'online' : 'offline'} notification for ${device.name}: status ${res.statusCode}`);
+      }
+    });
+  });
+
+  req.on('error', (err) => {
+    log(`[router] notification failed for ${device.name}: ${err.message}`);
+  });
+
+  req.on('timeout', () => {
+    log(`[router] notification timed out for ${device.name}`);
+    req.destroy();
+  });
+
+  req.end(body);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -167,6 +225,7 @@ function devicePublic(d) {
     power:       d.power,
     input:       d.input,
     emergency:   d.emergency,
+    connected:   d.connected,
     replyDelayMs: d.replyDelayMs,
     player: d.player ? {
       cwdPath:        d.player.cwdPath,
@@ -220,6 +279,8 @@ const simServer = http.createServer(async (req, res) => {
 
     const body = await readBodyJson(req);
 
+    const prevPower = device.power;
+
     // Apply safe subset of updates
     if (body.power       !== undefined) device.power        = body.power;
     if (body.input       !== undefined) device.input        = body.input;
@@ -232,6 +293,12 @@ const simServer = http.createServer(async (req, res) => {
     if (body.triggerRestart === true && device.player) {
       device.player.restartingUntil = Date.now() + (device.player.serveHtmlFor || 3000);
       log(`[sim] fault injection: ${device.name} player restarting for ${device.player.serveHtmlFor || 3000}ms`);
+    }
+
+    // Notify router when power changes (device must be "connected" for this to make sense)
+    if (body.power !== undefined && body.power !== prevPower && device.connected) {
+      log(`[sim] power changed ${prevPower} → ${body.power}, notifying router`);
+      notifyRouter(device, true);
     }
 
     broadcast({ type: 'device-update', device: devicePublic(device) });
@@ -263,6 +330,32 @@ const simServer = http.createServer(async (req, res) => {
     device.player.cwdParents = [];
     log(`[sim] device ${device.name} filesystem reset to default`);
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // ── PUT /api/devices/:id/cable — connect/disconnect CAT5 cable ──
+  const cableMatch = pathname.match(/^\/api\/devices\/([^/]+)\/cable$/);
+  if (req.method === 'PUT' && cableMatch) {
+    const id     = decodeURIComponent(cableMatch[1]);
+    const device = devices.find(d => d.id === id);
+    if (!device) { sendJson(res, 404, { error: 'not found' }); return; }
+
+    const body = await readBodyJson(req);
+    const wasConnected = device.connected;
+    device.connected = !!body.connected;
+
+    if (wasConnected && !device.connected) {
+      // Cable disconnected
+      log(`[sim] ${device.name} CAT5 cable disconnected`);
+      notifyRouter(device, false);
+    } else if (!wasConnected && device.connected) {
+      // Cable reconnected
+      log(`[sim] ${device.name} CAT5 cable connected`);
+      notifyRouter(device, true);
+    }
+
+    broadcast({ type: 'device-update', device: devicePublic(device) });
+    sendJson(res, 200, { device: devicePublic(device) });
     return;
   }
 
@@ -309,4 +402,19 @@ simServer.listen(simPort, '0.0.0.0', () => {
   log(`[sim] Web UI + API listening on http://0.0.0.0:${simPort}`);
   log(`[sim] NEC port: ${config.necPort}  |  TV HTTP: ${config.tvHttpPort}  |  Player HTTP: ${config.playerHttpPort}`);
   log(`[sim] Open http://${config.server}:${simPort} in your browser`);
+
+  // After a short delay, notify the router about all connected devices (simulates power-on / cable plug-in)
+  if (config.routerUrl) {
+    log(`[sim] Router URL: ${config.routerUrl} — will notify in 3s`);
+    setTimeout(() => {
+      for (const device of devices) {
+        if (device.connected) {
+          log(`[sim] Startup: notifying router about ${device.name}`);
+          notifyRouter(device, true);
+        }
+      }
+    }, 3000);
+  } else {
+    log(`[sim] No routerUrl configured — router notifications disabled`);
+  }
 });

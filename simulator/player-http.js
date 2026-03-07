@@ -227,6 +227,12 @@ export function createPlayerHttpServer(device, { port = 80, onLog } = {}) {
   }
 
   const server = http.createServer(async (req, res) => {
+    // Simulate cable disconnected: refuse all requests
+    if (device.connected === false) {
+      req.socket.destroy();
+      return;
+    }
+
     const urlPath  = req.url.split('?')[0];
     const rawQuery = req.url.includes('?') ? req.url.slice(req.url.indexOf('?') + 1) : '';
 

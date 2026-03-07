@@ -36,6 +36,12 @@ export function createTvHttpServer(device, { port = 80, onLog } = {}) {
   const log = (msg) => onLog?.(`[TV-HTTP ${device.name || device.id}] ${msg}`);
 
   const server = http.createServer((req, res) => {
+    // Simulate cable disconnected: refuse all requests
+    if (device.connected === false) {
+      req.socket.destroy();
+      return;
+    }
+
     const path = req.url.split('?')[0];
 
     if (path === '/pjctrl') {

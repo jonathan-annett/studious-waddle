@@ -84,6 +84,10 @@
   .badge.on  { background: rgba(76,175,80,.2); color: var(--ok); }
   .badge.off { background: rgba(127,140,141,.15); color: var(--muted); }
   .badge.em  { background: rgba(233,69,96,.2); color: var(--accent); }
+  .badge.cable-on { background: rgba(33,150,243,.2); color: #2196f3; }
+  .badge.cable-off { background: rgba(233,69,96,.2); color: var(--accent); }
+
+  .device-card.disconnected { border-color: var(--accent); opacity: 0.5; }
 
   #log-panel-wrap { display: flex; flex-direction: column; }
   .log-controls { padding: 8px 14px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
@@ -221,15 +225,17 @@ function renderDevice(d) {
   if (!el) { renderDevices(); return; }
 
   const isEm = d.emergency;
-  const dotClass = d.power === 'on' ? (isEm ? 'warn' : '') : 'off';
+  const isCableOff = d.connected === false;
+  const dotClass = isCableOff ? 'off' : (d.power === 'on' ? (isEm ? 'warn' : '') : 'off');
   const pl = d.player || {};
 
-  el.className = `device-card${d.power === 'off' ? ' offline' : ''}`;
+  el.className = `device-card${isCableOff ? ' disconnected' : (d.power === 'off' ? ' offline' : '')}`;
   el.innerHTML = `
     <div class="device-name">
       <span class="dot ${esc(dotClass)}"></span>
       ${esc(d.name)}
       ${powerBadge(d.power)}
+      ${isCableOff ? '<span class="badge cable-off">🔌 DISCONNECTED</span>' : '<span class="badge cable-on">🔗 CONNECTED</span>'}
       ${isEm ? '<span class="badge em">🚨 EMERGENCY</span>' : ''}
     </div>
 
@@ -247,6 +253,10 @@ function renderDevice(d) {
       <button class="danger"  onclick="setPower('${esc(d.id)}', 'off')">Power Off</button>
       <button onclick="setPower('${esc(d.id)}', 'standby')">Standby</button>
       <button onclick="resetFs('${esc(d.id)}')">Reset FS</button>
+      ${isCableOff
+        ? `<button class="primary" onclick="setCable('${esc(d.id)}', true)">Connect Cable</button>`
+        : `<button class="danger" onclick="setCable('${esc(d.id)}', false)">Disconnect Cable</button>`
+      }
     </div>
 
     <div class="fault-section">
@@ -273,6 +283,13 @@ function renderDevice(d) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function setPower(id, power) {
   await apiPut(id, { power });
+}
+
+async function setCable(id, connected) {
+  await fetch(`/api/devices/${encodeURIComponent(id)}/cable`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ connected }),
+  });
 }
 
 async function setDelay(id, ms) {
