@@ -2,7 +2,7 @@ const { openStreamDeck, listStreamDecks } = require('@elgato-stream-deck/node');
 const sharp = require('sharp');
 const WebSocket = require('ws');
 
-const SERVER_URL = 'ws://localhost:4001';
+const SERVER_URL = 'ws://192.168.100.1:4000/streamdeck';
 const activePaths = new Set();
 
 function getDeviceSpec(sd) {
