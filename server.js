@@ -3526,22 +3526,49 @@ function generateThumbnail(hash, ext) {
  * Returns { universe, dmx } or null if the packet is not valid sACN DMX data.
  */
 function parseSacnPacket(buf) {
-  if (buf.length < 126) return null;
+  if (buf.length < 126) {
+    log('debug', `[sACN parse] buffer too short: ${buf.length} < 126`);
+    return null;
+  }
   // Preamble size must be 0x0010
-  if (buf.readUInt16BE(0) !== 0x0010) return null;
+  const preamble = buf.readUInt16BE(0);
+  if (preamble !== 0x0010) {
+    log('debug', `[sACN parse] bad preamble: ${hex(preamble)} !== 0x0010`);
+    return null;
+  }
   // ACN packet identifier: "ASC-E1.17\0\0\0" at bytes 4–15
   const ACN_ID = Buffer.from([0x41,0x73,0x63,0x2D,0x45,0x31,0x2E,0x31,0x37,0x00,0x00,0x00]);
-  if (!buf.slice(4, 16).equals(ACN_ID)) return null;
+  if (!buf.slice(4, 16).equals(ACN_ID)) {
+    log('debug', `[sACN parse] bad ACN ID: ${buf.slice(4, 16).toString('hex')} !== ${ACN_ID.toString('hex')}`);
+    return null;
+  }
   // Root layer vector must be 0x00000004 (VECTOR_ROOT_E131_DATA)
-  if (buf.readUInt32BE(18) !== 0x00000004) return null;
+  const rootVec = buf.readUInt32BE(18);
+  if (rootVec !== 0x00000004) {
+    log('debug', `[sACN parse] bad root vector: ${hex(rootVec)} !== 0x00000004`);
+    return null;
+  }
   // Framing layer vector must be 0x00000002 (VECTOR_E131_DATA_PACKET)
-  if (buf.readUInt32BE(40) !== 0x00000002) return null;
+  const framingVec = buf.readUInt32BE(40);
+  if (framingVec !== 0x00000002) {
+    log('debug', `[sACN parse] bad framing vector: ${hex(framingVec)} !== 0x00000002`);
+    return null;
+  }
   const universe  = buf.readUInt16BE(113);
   const propCount = buf.readUInt16BE(123);
-  if (buf.length < 126 + propCount - 1) return null;
+  log('debug', `[sACN parse] universe=${universe}, propCount=${propCount}, bufLen=${buf.length}`);
+  if (buf.length < 126 + propCount - 1) {
+    log('debug', `[sACN parse] buffer too short for propCount: ${buf.length} < ${126 + propCount - 1}`);
+    return null;
+  }
   // Byte at offset 125 is the start code (must be 0x00 for standard DMX)
-  if (buf[125] !== 0x00) return null;
+  const startCode = buf[125];
+  if (startCode !== 0x00) {
+    log('debug', `[sACN parse] bad start code: ${hex(startCode)} !== 0x00`);
+    return null;
+  }
   const dmx = buf.slice(126, 126 + propCount - 1); // up to 512 bytes
+  log('debug', `[sACN parse] ✓ valid packet, DMX length=${dmx.length}`);
   return { universe, dmx };
 }
 
