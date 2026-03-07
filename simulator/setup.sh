@@ -7,12 +7,23 @@
 #
 # Usage:  sudo bash simulator/setup.sh           ← add aliases
 #         sudo bash simulator/setup.sh remove     ← remove aliases
+#
+# If node is installed via nvm (not visible to sudo), preserve PATH:
+#         sudo -E bash simulator/setup.sh
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEVICES_JSON="${SCRIPT_DIR}/devices.json"
 
+# ── Resolve node binary (nvm installs per-user, invisible to sudo) ────────────
+NODE=$(which node 2>/dev/null || echo "")
+if [ -z "$NODE" ]; then
+  echo "ERROR: node not found in PATH."
+  echo "If using nvm, run:  NODE=\$(which node) sudo -E bash $0 $*"
+  exit 1
+fi
+
 # ── Parse IPs from devices.json using node (no python/jq dependency) ──────────
-DEVICE_IPS=$(node -e "
+DEVICE_IPS=$("$NODE" -e "
   const d = JSON.parse(require('fs').readFileSync('${DEVICES_JSON}','utf8'));
   const ips = new Set();
   for (const dev of (d.devices || [])) {
@@ -106,6 +117,6 @@ if [ "$ACTION" = "remove" ]; then
   echo "Aliases removed from $IFACE."
 else
   echo "Aliases added to $IFACE. You can now start the simulator:"
-  echo "  sudo node simulator/server.js   (port 80 requires root)"
+  echo "  sudo $NODE simulator/server.js   (port 80 requires root)"
   echo "  — or set tvHttpPort/playerHttpPort to 7580/7581 in devices.json for non-root"
 fi
