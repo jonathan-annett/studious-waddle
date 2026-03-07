@@ -658,22 +658,23 @@ async function loadVcpState() {
       body: JSON.stringify({ sessionId }),
     }).then(x => x.json());
 
-    // Map VCP opPage 0x00 opcodes to slider values
-    const vcpOpcodes = {
-      0xD6: { id: 'sl-brightness', lv: 'lv-brightness' },
-      0xD8: { id: 'sl-contrast',   lv: 'lv-contrast' },
-      0xF0: { id: 'sl-backlight',  lv: 'lv-backlight' },
-      0xDF: { id: 'sl-sharpness',  lv: 'lv-sharpness' },
-      0xE2: { id: 'sl-volume',     lv: 'lv-volume' },
+    // Map VCP names (from interrogate response) to slider UI elements
+    const vcpNameMap = {
+      brightness:  { id: 'sl-brightness', lv: 'lv-brightness' },
+      contrast:    { id: 'sl-contrast',   lv: 'lv-contrast' },
+      sharpness:   { id: 'sl-sharpness',  lv: 'lv-sharpness' },
+      colorTemp:   { id: 'sl-colortemp',  lv: 'lv-colortemp' },
+      volume:      { id: 'sl-volume',     lv: 'lv-volume' },
     };
 
-    // Extract VCP values from interrogate response
-    for (const [opCode, info] of Object.entries(vcpOpcodes)) {
-      const opcodeNum = parseInt(opCode);
-      // Interrogate returns vcp: [{opCode, current, max}, ...]
-      const vcpEntry = (r.vcp ?? []).find(v => v.opCode === opcodeNum);
-      if (vcpEntry) {
-        const pct = Math.round((vcpEntry.current / (vcpEntry.max || 255)) * 100);
+    // Interrogate returns vcp as an object: { brightness: {current, max, ...}, ... }
+    const vcp = r.vcp ?? {};
+    for (const [vcpName, info] of Object.entries(vcpNameMap)) {
+      const vcpEntry = vcp[vcpName];
+      if (vcpEntry && !vcpEntry.error && vcpEntry.current !== undefined) {
+        const current = vcpEntry.current || 0;
+        const max = vcpEntry.max || 255;
+        const pct = Math.round((current / max) * 100);
         const sl = document.getElementById(info.id);
         const lv = document.getElementById(info.lv);
         if (sl) sl.value = pct;
