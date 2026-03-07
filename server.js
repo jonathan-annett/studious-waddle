@@ -3815,11 +3815,18 @@ function startSacnListener() {
 
   sock.on('error', e => log('warn', `[sACN] socket error: ${e.message}`));
 
+  // Counter for debugging packet reception
+  let pktCount = 0;
   sock.on('message', (msg, rinfo) => {
+    pktCount++;
+    if (pktCount % 100 === 1) log('debug', `[sACN] raw packet #${pktCount} from ${rinfo.address}: ${msg.length} bytes`);
     const parsed = parseSacnPacket(msg);
-    if (!parsed) return;
+    if (!parsed) {
+      if (pktCount % 100 === 1) log('debug', `[sACN] packet #${pktCount} failed parse`);
+      return;
+    }
     const { universe, dmx } = parsed;
-    log('info', `[sACN] Received universe ${universe} from ${rinfo.address}`);
+    log('info', `[sACN] Received universe ${universe} from ${rinfo.address} (packet #${pktCount})`);
     // Find device assigned to this universe
     const reg = loadRegistry();
     let found = false;
