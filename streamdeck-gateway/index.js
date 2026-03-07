@@ -83,8 +83,8 @@ async function setupDevice(deviceInfo) {
 
                 if (event === 'set_key') {
                     const idx = parseInt(data.index);
-                    const normal = await sharp(Buffer.from(data.image, 'base64')).resize(spec.size, spec.size).raw().toBuffer();
-                    let pressed = data.pressImage === false ? false : (data.pressImage ? await sharp(Buffer.from(data.pressImage, 'base64')).resize(spec.size, spec.size).raw().toBuffer() : null);
+                    const normal = await sharp(Buffer.from(data.image, 'base64')).resize(spec.size, spec.size).removeAlpha().raw().toBuffer();
+                    let pressed = data.pressImage === false ? false : (data.pressImage ? await sharp(Buffer.from(data.pressImage, 'base64')).resize(spec.size, spec.size).removeAlpha().raw().toBuffer() : null);
                     const entry = { normal, pressed };
                     if (splashActive) {
                         // Buffer for after splash clears
@@ -110,7 +110,7 @@ async function setupDevice(deviceInfo) {
                         const c = i % cols;
                         const buf = await masterImage.clone()
                             .extract({ left: c * size, top: r * size, width: size, height: size })
-                            .raw().toBuffer();
+                            .removeAlpha().raw().toBuffer();
                         const idx = parseInt(deckIndex);
                         const entry = { normal: buf, pressed: false };
                         if (splashActive) {
@@ -142,7 +142,7 @@ async function setupDevice(deviceInfo) {
                         const c = i % spec.cols;
                         const buf = await masterImage.clone()
                             .extract({ left: c * size, top: r * size, width: size, height: size })
-                            .raw().toBuffer();
+                            .removeAlpha().raw().toBuffer();
                         keyCache.set(i, { normal: buf, pressed: false });
                         return sd.fillKeyBuffer(i, buf);
                     });
