@@ -3713,7 +3713,17 @@ async function sacnHandleFolders(mac, dmx) {
 
     log('info', `[sACN] ${mac} → folder "${folder.name}" (ch ${folder.channel})`);
     try {
-      await playFolder(device.tvIp, folder.name, null, 1);
+      // Extract actual folder name from folderPath (e.g. "/mnt/usb1/My Folder" → "My Folder")
+      // This ensures we search for the correct name in the player's filelist
+      // Handle both full paths and simple names
+      let actualFolderName = folder.folderPath;
+      if (folder.folderPath.includes('/')) {
+        actualFolderName = folder.folderPath.split('/').pop();
+      }
+      if (!actualFolderName) throw new Error(`Invalid folderPath: ${folder.folderPath}`);
+
+      log('debug', `[sACN] playFolder: display="${folder.name}" actual="${actualFolderName}" path="${folder.folderPath}"`);
+      await playFolder(device.tvIp, actualFolderName, null, 1);
       reg.devices[mac].autoplay = folder.name;
       saveRegistry(reg);
     } catch (e) {
