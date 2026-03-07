@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # simulator/setup.sh
 #
-# Sets up loopback IP aliases so the simulator can bind to 127.0.0.x addresses.
-# Run this once before starting the simulator (needs sudo).
+# Sets up IP aliases on the LAN interface so the simulator can bind to
+# addresses reachable from the router. The script auto-detects which
+# network interface carries the same subnet as the device IPs in devices.json.
 #
-# Usage:  sudo bash simulator/setup.sh
-#         sudo bash simulator/setup.sh remove   ← remove aliases
+# Usage:  sudo bash simulator/setup.sh           ← add aliases
+#         sudo bash simulator/setup.sh remove     ← remove aliases
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEVICES_JSON="${SCRIPT_DIR}/devices.json"
@@ -29,47 +30,82 @@ fi
 ACTION="${1:-add}"
 OS="$(uname -s)"
 
-echo "=== NEC Simulator IP alias setup ($OS) — action: $ACTION ==="
+# ── Auto-detect the correct network interface ────────────────────────────────
+# Takes the first device IP, derives its /24 subnet prefix, and finds which
+# interface already has an address on that subnet.
+FIRST_IP=$(echo "$DEVICE_IPS" | head -1)
+SUBNET_PREFIX=$(echo "$FIRST_IP" | cut -d. -f1-3)
+
+if [ "$OS" = "Darwin" ]; then
+  # macOS: scan ifconfig output for an existing IP on the same /24
+  IFACE=$(ifconfig -a 2>/dev/null | awk -v prefix="$SUBNET_PREFIX" '
+    /^[a-zA-Z]/ { iface=$1; sub(/:$/,"",iface) }
+    /inet / { split($2,a,"."); pfx=a[1]"."a[2]"."a[3]; if (pfx==prefix) { print iface; exit } }
+  ')
+elif [ "$OS" = "Linux" ]; then
+  IFACE=$(ip -o addr show 2>/dev/null | awk -v prefix="$SUBNET_PREFIX" '
+    { split($4,a,"/"); split(a[1],b,"."); pfx=b[1]"."b[2]"."b[3];
+      if (pfx==prefix) { print $2; exit } }
+  ')
+fi
+
+if [ -z "$IFACE" ]; then
+  echo "ERROR: Could not find a network interface on the ${SUBNET_PREFIX}.x subnet."
+  echo "Make sure this machine has a LAN connection on that subnet before running setup."
+  exit 1
+fi
+
+echo "=== NEC Simulator IP alias setup ($OS) ==="
+echo "Action:    $ACTION"
+echo "Interface: $IFACE  (detected from ${SUBNET_PREFIX}.x subnet)"
 echo "IPs from devices.json:"
 echo "$DEVICE_IPS" | sed 's/^/  /'
 echo ""
 
+# ── Check for existing host address — don't alias our own IP ─────────────────
+if [ "$OS" = "Darwin" ]; then
+  HOST_IP=$(ifconfig "$IFACE" 2>/dev/null | awk '/inet / { print $2; exit }')
+elif [ "$OS" = "Linux" ]; then
+  HOST_IP=$(ip -4 addr show dev "$IFACE" 2>/dev/null | awk '/inet / { split($2,a,"/"); print a[1]; exit }')
+fi
+
 for IP in $DEVICE_IPS; do
-  # Skip 127.0.0.1 — already exists
-  [ "$IP" = "127.0.0.1" ] && continue
+  # Skip our own address
+  if [ "$IP" = "$HOST_IP" ]; then
+    echo "  Skipping $IP (host's own address on $IFACE)"
+    continue
+  fi
 
   if [ "$OS" = "Darwin" ]; then
-    # macOS: ifconfig lo0 alias / -alias
     if [ "$ACTION" = "remove" ]; then
-      echo "  Removing lo0 alias $IP"
-      sudo ifconfig lo0 -alias "$IP" 2>/dev/null || true
+      echo "  Removing $IFACE alias $IP"
+      sudo ifconfig "$IFACE" -alias "$IP" 2>/dev/null || true
     else
-      echo "  Adding lo0 alias $IP"
-      sudo ifconfig lo0 alias "$IP" up
+      echo "  Adding $IFACE alias $IP"
+      sudo ifconfig "$IFACE" alias "$IP" netmask 255.255.255.0 up
     fi
 
   elif [ "$OS" = "Linux" ]; then
-    # Linux: ip addr add/del on lo
     if [ "$ACTION" = "remove" ]; then
-      echo "  Removing lo alias $IP/8"
-      sudo ip addr del "${IP}/8" dev lo 2>/dev/null || true
+      echo "  Removing $IFACE alias $IP/24"
+      sudo ip addr del "${IP}/24" dev "$IFACE" 2>/dev/null || true
     else
-      echo "  Adding lo alias $IP/8"
-      sudo ip addr add "${IP}/8" dev lo 2>/dev/null || echo "    (already exists, skipping)"
+      echo "  Adding $IFACE alias $IP/24"
+      sudo ip addr add "${IP}/24" dev "$IFACE" 2>/dev/null || echo "    (already exists, skipping)"
     fi
 
   else
     echo "Unknown OS '$OS'. Add aliases manually:"
-    echo "  ifconfig lo0 alias $IP up   (macOS)"
-    echo "  ip addr add $IP/8 dev lo     (Linux)"
+    echo "  ifconfig <iface> alias $IP netmask 255.255.255.0 up   (macOS)"
+    echo "  ip addr add $IP/24 dev <iface>                         (Linux)"
   fi
 done
 
 echo ""
 if [ "$ACTION" = "remove" ]; then
-  echo "Aliases removed."
+  echo "Aliases removed from $IFACE."
 else
-  echo "Aliases added. You can now start the simulator:"
+  echo "Aliases added to $IFACE. You can now start the simulator:"
   echo "  sudo node simulator/server.js   (port 80 requires root)"
   echo "  — or set tvHttpPort/playerHttpPort to 7580/7581 in devices.json for non-root"
 fi
