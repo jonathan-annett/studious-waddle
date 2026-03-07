@@ -224,6 +224,11 @@ body.console-mode input[type=range] { cursor: default; }
 .lock-btn:hover { border-color: var(--warn); color: var(--warn); }
 .lock-btn.locked { background: rgba(255,149,0,.1); border-color: var(--warn); color: var(--warn); }
 .lock-btn.locked:hover { background: rgba(255,149,0,.2); }
+.level-status {
+  grid-column: 1/-1; font-size: 9px; color: var(--muted); font-family: var(--mono);
+  margin-top: -4px; padding: 0 0 4px 0; border-top: 1px solid var(--border);
+  line-height: 1.3;
+}
 
 /* ── Console monitor ── */
 #console-body { display: none; }
@@ -344,6 +349,8 @@ body.console-mode #console-body { display: block; }
         oninput="onSlider('brightness',this.value)"
         onchange="doVcp(0x00,0x10,this.value)">
       <button class="lock-btn" id="lock-brightness" onclick="toggleLock('brightness')" title="Lock: prevent console from changing">🔓</button>
+      <button class="lock-btn" id="reset-brightness" onclick="resetToDefault('brightness')" title="Reset to default and lock">↺</button>
+      <div class="level-status" id="status-brightness"></div>
     </div>
     <div class="level-row">
       <div class="level-label">Contrast <span class="level-val" id="lv-contrast">—</span></div>
@@ -352,6 +359,8 @@ body.console-mode #console-body { display: block; }
         oninput="onSlider('contrast',this.value)"
         onchange="doVcp(0x00,0x12,this.value)">
       <button class="lock-btn" id="lock-contrast" onclick="toggleLock('contrast')" title="Lock: prevent console from changing">🔓</button>
+      <button class="lock-btn" id="reset-contrast" onclick="resetToDefault('contrast')" title="Reset to default and lock">↺</button>
+      <div class="level-status" id="status-contrast"></div>
     </div>
     <div class="level-row">
       <div class="level-label">Backlight <span class="level-val" id="lv-backlight">—</span></div>
@@ -360,6 +369,8 @@ body.console-mode #console-body { display: block; }
         oninput="onSlider('backlight',this.value)"
         onchange="doVcp(0x00,0x13,this.value)">
       <button class="lock-btn" id="lock-backlight" onclick="toggleLock('backlight')" title="Lock: prevent console from changing">🔓</button>
+      <button class="lock-btn" id="reset-backlight" onclick="resetToDefault('backlight')" title="Reset to default and lock">↺</button>
+      <div class="level-status" id="status-backlight"></div>
     </div>
     <div class="level-row">
       <div class="level-label">Sharpness <span class="level-val" id="lv-sharpness">—</span></div>
@@ -368,6 +379,8 @@ body.console-mode #console-body { display: block; }
         oninput="onSlider('sharpness',this.value)"
         onchange="doVcp(0x00,0x87,this.value)">
       <button class="lock-btn" id="lock-sharpness" onclick="toggleLock('sharpness')" title="Lock: prevent console from changing">🔓</button>
+      <button class="lock-btn" id="reset-sharpness" onclick="resetToDefault('sharpness')" title="Reset to default and lock">↺</button>
+      <div class="level-status" id="status-sharpness"></div>
     </div>
     <div class="level-row">
       <div class="level-label">Volume <span class="level-val" id="lv-volume">—</span></div>
@@ -376,6 +389,8 @@ body.console-mode #console-body { display: block; }
         oninput="onSlider('volume',this.value)"
         onchange="doVcp(0x00,0x62,this.value)">
       <button class="lock-btn" id="lock-volume" onclick="toggleLock('volume')" title="Lock: prevent console from changing">🔓</button>
+      <button class="lock-btn" id="reset-volume" onclick="resetToDefault('volume')" title="Reset to default and lock">↺</button>
+      <div class="level-status" id="status-volume"></div>
     </div>
   </div>
 
@@ -414,9 +429,11 @@ let consoleLost = false;  // true = sACN packets were lost, now in manual mode
 const CONSOLE_LOST_TIMEOUT = 15000; // 15 seconds — sACNView has gaps in transmission
 
 // VCP state tracking
-let vcpMaxValues = {};    // { brightness: 255, contrast: 255, ... }
-let vcpInitialValues = {}; // { brightness: 128, contrast: 100, ... } — captured on load
-let vcpLockedState = {};  // { brightness: false, contrast: true, ... }
+let vcpMaxValues = {};        // { brightness: 255, contrast: 255, ... }
+let vcpInitialValues = {};    // { brightness: 128, contrast: 100, ... } — captured on load
+let vcpDeviceValues = {};     // { brightness: 128, contrast: 100, ... } — last known device state
+let vcpDmxValues = {};        // { brightness: 60, contrast: 100, ... } — last DMX values received (0-100%)
+let vcpLockedState = {};      // { brightness: false, contrast: true, ... }
 const VCP_CONTROLS = {
   brightness: { opCode: 0x10, name: 'brightness' },
   contrast:   { opCode: 0x12, name: 'contrast' },
@@ -424,7 +441,11 @@ const VCP_CONTROLS = {
   sharpness:  { opCode: 0x87, name: 'sharpness' },
   volume:     { opCode: 0x62, name: 'volume' },
 };
-for (const name in VCP_CONTROLS) vcpLockedState[name] = false;
+for (const name in VCP_CONTROLS) {
+  vcpLockedState[name] = false;
+  vcpDmxValues[name] = 0;
+  vcpDeviceValues[name] = 0;
+}
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 async function boot() {
@@ -560,11 +581,7 @@ function onSacnUpdate(channels) {
   // Update folder active states
   updateFolderActiveStates(channels);
 
-  // In manual mode, don't update sliders from sACN — they reflect manual control only
-  // This prevents confusion where sACN updates show but device doesn't respond
-  if (!consoleMode) return;
-
-  // Mirror VCP sliders in console mode (respecting locks)
+  // Track DMX values and update status displays (always, regardless of mode)
   const vcp_map = [
     { name:'brightness', idx:3, id:'sl-brightness', lv:'lv-brightness' },
     { name:'contrast',   idx:4, id:'sl-contrast',   lv:'lv-contrast' },
@@ -573,14 +590,23 @@ function onSacnUpdate(channels) {
     { name:'volume',     idx:7, id:'sl-volume',     lv:'lv-volume' },
   ];
   for (const v of vcp_map) {
-    // Skip if this control is locked
-    if (vcpLockedState[v.name]) continue;
-
     const dmxValue = channels[v.idx] ?? 0;
     const max = vcpMaxValues[v.name] || 255;
     const actual = Math.round((dmxValue / 255) * max);
     const pct = Math.round((actual / max) * 100);
+    vcpDmxValues[v.name] = pct;  // Store DMX percentage
+    updateStatusDisplay(v.name);
+  }
 
+  // In manual mode, don't update sliders from sACN — they reflect manual control only
+  if (!consoleMode) return;
+
+  // Mirror VCP sliders in console mode (respecting locks)
+  for (const v of vcp_map) {
+    // Skip if this control is locked
+    if (vcpLockedState[v.name]) continue;
+
+    const pct = vcpDmxValues[v.name];
     const sl = document.getElementById(v.id);
     const lv = document.getElementById(v.lv);
     if (sl) sl.value = pct;
@@ -617,6 +643,45 @@ function toggleLock(controlName) {
     btn.classList.toggle('locked', vcpLockedState[controlName]);
     btn.textContent = vcpLockedState[controlName] ? '🔒' : '🔓';
   }
+  updateStatusDisplay(controlName);
+}
+
+function resetToDefault(controlName) {
+  // Reset slider to default value and lock it
+  const defaultPct = vcpInitialValues[controlName] ?? 0;
+  const sl = document.getElementById(`sl-${controlName}`);
+  if (sl) {
+    sl.value = defaultPct;
+    // Send the value to the device
+    const ctrl = VCP_CONTROLS[controlName];
+    if (ctrl && sessionId) {
+      doVcp(0x00, ctrl.opCode, defaultPct).catch(() => {});
+    }
+  }
+  // Lock it
+  vcpLockedState[controlName] = true;
+  const lockBtn = document.getElementById(`lock-${controlName}`);
+  if (lockBtn) {
+    lockBtn.classList.add('locked');
+    lockBtn.textContent = '🔒';
+  }
+  updateStatusDisplay(controlName);
+}
+
+function updateStatusDisplay(controlName) {
+  const statusEl = document.getElementById(`status-${controlName}`);
+  if (!statusEl) return;
+
+  const mode = consoleMode ? 'console' : 'manual';
+  const dmxPct = vcpDmxValues[controlName] ?? 0;
+  const devicePct = vcpDeviceValues[controlName] ?? 0;
+  const defaultPct = vcpInitialValues[controlName] ?? 0;
+  const locked = vcpLockedState[controlName] ? ' [LOCKED]' : '';
+
+  const dmxChannel = 3 + Object.keys(VCP_CONTROLS).indexOf(controlName);
+  const uniChannel = `DMX 1:${dmxChannel + 1}`;
+
+  statusEl.textContent = `(${mode}) ${uniChannel}  ${dmxPct}% → ${devicePct}%,  default ${defaultPct}%${locked}`;
 }
 
 // ── Folder management ──────────────────────────────────────────────────────
@@ -783,17 +848,23 @@ async function loadVcpState() {
         // Store max value for later scaling
         vcpMaxValues[vcpName] = max;
 
+        // Store device value for status display
+        const pct = Math.round((current / max) * 100);
+        vcpDeviceValues[vcpName] = pct;
+
         // On initial load, capture the starting values (for restoration later)
         if (isInitialLoad) {
-          vcpInitialValues[vcpName] = Math.round((current / max) * 100);
+          vcpInitialValues[vcpName] = pct;
         }
 
         // Display as percentage (0-100)
-        const pct = Math.round((current / max) * 100);
         const sl = document.getElementById(info.id);
         const lv = document.getElementById(info.lv);
         if (sl) sl.value = pct;
         if (lv) lv.textContent = pct + '%';
+
+        // Update status display
+        updateStatusDisplay(vcpName);
       }
     }
   } catch(e) {
