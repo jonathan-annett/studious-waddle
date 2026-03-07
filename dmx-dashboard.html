@@ -474,7 +474,6 @@ async function boot() {
   try {
     const st = await fetch(`/api/sacn/${deviceMac}/state`).then(x => x.json());
     currentChannels = st.channels ?? currentChannels;
-    if (st.showMode) setConsoleMode(true);
   } catch {}
 
   initWs();
@@ -517,13 +516,12 @@ function initWs() {
   ws.onmessage = e => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'sacn-update' && msg.mac === deviceMac) onSacnUpdate(msg.channels);
-    if (msg.type === 'sacn-status' && msg.mac === deviceMac) setConsoleMode(msg.showMode);
     if (msg.type === 'sacn-temp-update' && msg.mac === deviceMac) loadTempFolders();
   };
   ws.onclose = () => setTimeout(initWs, 2000);
 }
 
-// ── Console mode switching ─────────────────────────────────────────────────
+// ── sACN Updates ───────────────────────────────────────────────────────────
 function onSacnUpdate(channels) {
   currentChannels = channels;
   lastPacketMs    = Date.now();
