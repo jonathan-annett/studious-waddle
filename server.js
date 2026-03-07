@@ -3791,17 +3791,24 @@ function startSacnListener() {
 
   sock.on('error', e => log('warn', `[sACN] socket error: ${e.message}`));
 
-  sock.on('message', (msg) => {
+  sock.on('message', (msg, rinfo) => {
     const parsed = parseSacnPacket(msg);
     if (!parsed) return;
     const { universe, dmx } = parsed;
+    log('info', `[sACN] Received universe ${universe} from ${rinfo.address}`);
     // Find device assigned to this universe
     const reg = loadRegistry();
+    let found = false;
     for (const [mac, device] of Object.entries(reg.devices ?? {})) {
       if (device.sacnUniverse === universe) {
+        log('info', `[sACN] → matched to device "${device.name}" (${mac})`);
         sacnReceive(mac, dmx);
+        found = true;
         break;
       }
+    }
+    if (!found) {
+      log('warn', `[sACN] Universe ${universe} has no assigned device`);
     }
   });
 
