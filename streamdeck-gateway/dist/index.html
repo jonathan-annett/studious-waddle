@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Stream Deck Remote Satellite</title>
+    <style>
+        body { font-family: sans-serif; background: #1a1a1a; color: white; display: flex; flex-direction: column; align-items: center; padding: 50px; }
+        .card { background: #2a2a2a; padding: 20px; border-radius: 8px; border: 1px solid #444; }
+        button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; }
+        button:disabled { background: #555; }
+        #status { margin-top: 10px; color: #aaa; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>Remote Stream Deck Bridge</h2>
+        <button id="connectBtn">Connect Stream Deck</button>
+        <div id="status">Status: Waiting for user...</div>
+    </div>
+
+    <script src="streamdeck-vendor.js"></script>
+    <script src="remote.js"></script>
+    <script>
+        const bridge = new StreamDeckRemote('ws://localhost:4001');
+        
+        document.getElementById('connectBtn').onclick = async () => {
+            document.getElementById('status').innerText = "Status: Authorizing USB...";
+            try {
+                await bridge.init();
+                document.getElementById('status').innerText = "Status: Connected and Streaming";
+                document.getElementById('connectBtn').disabled = true;
+            } catch (e) {
+                document.getElementById('status').innerText = "Error: " + e.message;
+            }
+        };
+    </script>
+</body>
+</html>
