@@ -6,7 +6,8 @@
     "simPort":        4001,
     "necPort":        7142,
     "tvHttpPort":     80,
-    "playerHttpPort": 80
+    "playerHttpPort": 80,
+    "server" :  "192.168.100.219"
   },
 
   "devices": [

@@ -35,6 +35,7 @@ const config = {
   necPort:          rawCfg.config?.necPort          ?? 7142,
   tvHttpPort:       rawCfg.config?.tvHttpPort       ?? 80,
   playerHttpPort:   rawCfg.config?.playerHttpPort   ?? 80,
+  server:           rawCfg.config?.server           ?? "127.0.0.1"
 };
 
 // Merge devices from JSON into live state objects
@@ -307,5 +308,5 @@ const simPort = parseInt(process.argv[2] || String(config.simPort), 10);
 simServer.listen(simPort, '0.0.0.0', () => {
   log(`[sim] Web UI + API listening on http://0.0.0.0:${simPort}`);
   log(`[sim] NEC port: ${config.necPort}  |  TV HTTP: ${config.tvHttpPort}  |  Player HTTP: ${config.playerHttpPort}`);
-  log(`[sim] Open http://localhost:${simPort} in your browser`);
+  log(`[sim] Open http://${config.server}:${simPort} in your browser`);
 });
