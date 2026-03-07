@@ -1232,8 +1232,9 @@ async function handleApi(method, pathname, body, req) {
       : findDeviceByTvIp(reg, tvIP);
     if (found) {
       reg.devices[found.mac].autoplay = null;
+      reg.devices[found.mac].defaultGroup = null;
       saveRegistry(reg);
-      log('info', `[player/stop] autoplay=null saved for ${found.mac}`);
+      log('info', `[player/stop] autoplay + defaultGroup cleared for ${found.mac}`);
     }
 
     // Step 2: apply (best-effort)
