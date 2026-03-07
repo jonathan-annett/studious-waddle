@@ -413,6 +413,7 @@ async function boot() {
 
   await loadFolders();
   await loadTempFolders();
+  await loadVcpState();  // Load current slider values
 
   // Load current sACN state (in case server already has DMX data)
   try {
@@ -422,6 +423,7 @@ async function boot() {
   } catch {}
 
   initWs();
+  startVcpPoll();  // Poll VCP state every 10s to catch manual changes via IR/web UI
   window.addEventListener('beforeunload', cleanup);
 }
 
@@ -431,6 +433,7 @@ function showError(msg) {
 }
 
 async function cleanup() {
+  if (vcpPollHandle) clearInterval(vcpPollHandle);
   if (sessionId) {
     try { fetch(`/api/connect/${sessionId}`, { method: 'DELETE', keepalive: true }); }
     catch {}
@@ -515,9 +518,24 @@ function takeManualControl() {
 // ── Folder management ──────────────────────────────────────────────────────
 async function loadFolders() {
   try {
-    const r = await fetch(`/api/sacn/${deviceMac}/folders`).then(x => x.json());
-    folders = r.folders ?? [];
-  } catch { folders = []; }
+    // Load all folders from the media player (like the main UI does)
+    const r = await fetch('/api/player/folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tvIP: deviceTvIp }),
+    }).then(x => x.json());
+
+    // Convert player folder names to dashboard folder objects
+    // Assign sequential DMX channels starting from 101
+    folders = (r.folders ?? []).map((name, idx) => ({
+      channel: 101 + idx,
+      name: name,
+      folderPath: name,  // Player API returns just folder names
+    }));
+  } catch(e) {
+    console.warn('Failed to load folders:', e);
+    folders = [];
+  }
   renderFolderGrid();
 }
 
@@ -626,6 +644,53 @@ async function doPlayFolder(name, folderPath) {
       if (btn) btn.classList.toggle('active', t.name === name);
     }
   } catch(e) { alert('Play failed: ' + e.message); }
+}
+
+// ── VCP State (brightness, contrast, etc.) ─────────────────────────────────
+let vcpPollHandle = null;
+
+async function loadVcpState() {
+  if (!sessionId || !deviceMac) return;
+  try {
+    const r = await fetch('/api/interrogate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    }).then(x => x.json());
+
+    // Map VCP opPage 0x00 opcodes to slider values
+    const vcpOpcodes = {
+      0xD6: { id: 'sl-brightness', lv: 'lv-brightness' },
+      0xD8: { id: 'sl-contrast',   lv: 'lv-contrast' },
+      0xF0: { id: 'sl-backlight',  lv: 'lv-backlight' },
+      0xDF: { id: 'sl-sharpness',  lv: 'lv-sharpness' },
+      0xE2: { id: 'sl-volume',     lv: 'lv-volume' },
+    };
+
+    // Extract VCP values from interrogate response
+    for (const [opCode, info] of Object.entries(vcpOpcodes)) {
+      const opcodeNum = parseInt(opCode);
+      // Interrogate returns vcp: [{opCode, current, max}, ...]
+      const vcpEntry = (r.vcp ?? []).find(v => v.opCode === opcodeNum);
+      if (vcpEntry) {
+        const pct = Math.round((vcpEntry.current / (vcpEntry.max || 255)) * 100);
+        const sl = document.getElementById(info.id);
+        const lv = document.getElementById(info.lv);
+        if (sl) sl.value = pct;
+        if (lv) lv.textContent = pct + '%';
+      }
+    }
+  } catch(e) {
+    console.warn('Failed to load VCP state:', e);
+  }
+}
+
+function startVcpPoll() {
+  if (vcpPollHandle) clearInterval(vcpPollHandle);
+  // Poll every 10 seconds, but only in manual mode (not console mode)
+  vcpPollHandle = setInterval(() => {
+    if (!consoleMode) loadVcpState().catch(() => {});
+  }, 10000);
 }
 
 // ── Temp folders ───────────────────────────────────────────────────────────
