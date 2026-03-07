@@ -416,7 +416,7 @@ let packetTimeoutHandle = null;
 let currentChannels = new Array(512).fill(0);
 let currentInput    = null; // last known input VCP code
 let currentPlaying  = null; // last known folder name
-let lastActiveFolders = []; // previous active folder channels for transition detection
+let lastFolderBitmap = 0; // bitmap of previous active folders for transition detection
 const INPUT_NAMES   = { 0x11:'HDMI1', 0x12:'HDMI2', 0x0F:'DP1', 0x10:'DP2', 0x87:'Media Player' };
 
 // Console connection tracking
@@ -733,64 +733,66 @@ async function setFolderThumb(channel, hash) {
 }
 
 function updateFolderActiveStates(channels) {
-  // Count active folder faders
+  // Build bitmap: each folder gets a bit (1 if fader >= 128, else 0)
+  let bitmap = 0;
+  for (let i = 0; i < folders.length; i++) {
+    const idx = folders[i].channel - 1; // 0-based
+    if (idx >= 0 && idx < 512 && (channels[idx] ?? 0) >= 128) {
+      bitmap |= (1 << i);
+    }
+  }
+
+  // No change: abort early
+  if (bitmap === lastFolderBitmap) return;
+  lastFolderBitmap = bitmap;
+
+  console.log('[DMX] Folder bitmap changed: %s → %s',
+    lastFolderBitmap.toString(2).padStart(folders.length, '0'),
+    bitmap.toString(2).padStart(folders.length, '0'));
+
+  // Determine active folders from bitmap
   const activeChs = [];
-  for (const f of folders) {
-    const idx = f.channel - 1; // 0-based
-    if (idx >= 0 && idx < 512 && (channels[idx] ?? 0) >= 128) activeChs.push(f.channel);
+  for (let i = 0; i < folders.length; i++) {
+    if (bitmap & (1 << i)) activeChs.push(folders[i].channel);
   }
 
-  // Track previous active state to detect transitions
-  const prevActive = lastActiveFolders || [];
-  lastActiveFolders = activeChs;
+  // ─────────────────────────────────────────────────────────────────────────
+  // Handle playback based on bitmap state
+  // ─────────────────────────────────────────────────────────────────────────
 
-  console.log('[DMX] Folder faders: prev=%O, now=%O (count: %d)', prevActive, activeChs, activeChs.length);
-
-  // Handle playback based on active folder count
-  if (activeChs.length === 0) {
-    console.log('[DMX] No folders active → stop playback');
-    // Would call stopPlayback() here if implemented
-    currentPlaying = null;
-  } else if (activeChs.length === 1) {
-    // Single folder active: play it if it just became active
-    const activeChannel = activeChs[0];
-    const f = folders.find(x => x.channel === activeChannel);
-    if (f && !prevActive.includes(activeChannel)) {
-      console.log('[DMX] Single folder CH%d "%s" just activated → calling doPlayFolder()', f.channel, f.name);
-      doPlayFolder(f.name, f.folderPath).catch(e => console.warn('[DMX] Auto-play failed:', e.message));
-    }
-  } else {
-    // 2+ folders active: HOLD (don't switch)
-    console.log('[DMX] %d folders active (crossfade hold) — not switching', activeChs.length);
-  }
-
-  // Update UI styling
-  for (const f of folders) {
-    const btn = document.getElementById(`fbtn-${f.channel}`);
-    if (!btn) continue;
-    btn.classList.remove('active', 'crossfade');
-    if (activeChs.includes(f.channel)) {
-      btn.classList.add(activeChs.length > 1 ? 'crossfade' : 'active');
-    }
-  }
-
-  // Update subheader
-  if (activeChs.length === 1) {
-    const f = folders.find(x => x.channel === activeChs[0]);
-    if (f) {
-      currentPlaying = f.name;
-      document.getElementById('sh-playing').textContent = f.name;
-    }
-  } else if (activeChs.length === 0) {
+  if (bitmap === 0) {
+    // No folders active: stop
+    console.log('[DMX] All faders down → stop playback');
     currentPlaying = null;
     document.getElementById('sh-playing').textContent = '— (stopped)';
+  } else if ((bitmap & (bitmap - 1)) === 0) {
+    // Exactly one bit set: single folder active
+    const activeIdx = Math.log2(bitmap);
+    const f = folders[activeIdx];
+    console.log('[DMX] Single folder active: CH%d "%s" → calling doPlayFolder()', f.channel, f.name);
+    doPlayFolder(f.name, f.folderPath).catch(e => console.warn('[DMX] Auto-play failed:', e.message));
+    currentPlaying = f.name;
   } else {
-    // 2+ active: show folder list
+    // 2+ bits set: hold (don't switch)
+    console.log('[DMX] %d folders active (hold) — not switching', activeChs.length);
     const names = activeChs.map(ch => {
       const f = folders.find(x => x.channel === ch);
       return f ? f.name : `CH${ch}`;
     }).join(' + ');
     document.getElementById('sh-playing').textContent = `${names} (holding)`;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Update UI styling
+  // ─────────────────────────────────────────────────────────────────────────
+  for (let i = 0; i < folders.length; i++) {
+    const f = folders[i];
+    const btn = document.getElementById(`fbtn-${f.channel}`);
+    if (!btn) continue;
+    btn.classList.remove('active', 'crossfade');
+    if (bitmap & (1 << i)) {
+      btn.classList.add(activeChs.length === 1 ? 'active' : 'crossfade');
+    }
   }
 }
 
