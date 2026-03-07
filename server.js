@@ -3526,49 +3526,22 @@ function generateThumbnail(hash, ext) {
  * Returns { universe, dmx } or null if the packet is not valid sACN DMX data.
  */
 function parseSacnPacket(buf) {
-  if (buf.length < 126) {
-    log('debug', `[sACN parse] buffer too short: ${buf.length} < 126`);
-    return null;
-  }
+  if (buf.length < 126) return null;
   // Preamble size must be 0x0010
-  const preamble = buf.readUInt16BE(0);
-  if (preamble !== 0x0010) {
-    log('debug', `[sACN parse] bad preamble: ${hex(preamble)} !== 0x0010`);
-    return null;
-  }
+  if (buf.readUInt16BE(0) !== 0x0010) return null;
   // ACN packet identifier: "ASC-E1.17\0\0\0" at bytes 4–15 (uppercase)
   const ACN_ID = Buffer.from([0x41,0x53,0x43,0x2D,0x45,0x31,0x2E,0x31,0x37,0x00,0x00,0x00]);
-  if (!buf.slice(4, 16).equals(ACN_ID)) {
-    log('debug', `[sACN parse] bad ACN ID: ${buf.slice(4, 16).toString('hex')} !== ${ACN_ID.toString('hex')}`);
-    return null;
-  }
+  if (!buf.slice(4, 16).equals(ACN_ID)) return null;
   // Root layer vector must be 0x00000004 (VECTOR_ROOT_E131_DATA)
-  const rootVec = buf.readUInt32BE(18);
-  if (rootVec !== 0x00000004) {
-    log('debug', `[sACN parse] bad root vector: ${hex(rootVec)} !== 0x00000004`);
-    return null;
-  }
+  if (buf.readUInt32BE(18) !== 0x00000004) return null;
   // Framing layer vector must be 0x00000002 (VECTOR_E131_DATA_PACKET)
-  const framingVec = buf.readUInt32BE(40);
-  if (framingVec !== 0x00000002) {
-    log('debug', `[sACN parse] bad framing vector: ${hex(framingVec)} !== 0x00000002`);
-    return null;
-  }
+  if (buf.readUInt32BE(40) !== 0x00000002) return null;
   const universe  = buf.readUInt16BE(113);
   const propCount = buf.readUInt16BE(123);
-  log('debug', `[sACN parse] universe=${universe}, propCount=${propCount}, bufLen=${buf.length}`);
-  if (buf.length < 126 + propCount - 1) {
-    log('debug', `[sACN parse] buffer too short for propCount: ${buf.length} < ${126 + propCount - 1}`);
-    return null;
-  }
+  if (buf.length < 126 + propCount - 1) return null;
   // Byte at offset 125 is the start code (must be 0x00 for standard DMX)
-  const startCode = buf[125];
-  if (startCode !== 0x00) {
-    log('debug', `[sACN parse] bad start code: ${hex(startCode)} !== 0x00`);
-    return null;
-  }
+  if (buf[125] !== 0x00) return null;
   const dmx = buf.slice(126, 126 + propCount - 1); // up to 512 bytes
-  log('debug', `[sACN parse] ✓ valid packet, DMX length=${dmx.length}`);
   return { universe, dmx };
 }
 
@@ -3606,10 +3579,7 @@ async function getSacnSession(mac) {
 function joinUniverse(universe) {
   if (!sacnSocket.sock) { log('warn', `[sACN] socket not ready, cannot join universe ${universe}`); return; }
   const addr = sacnMulticastAddr(universe);
-  if (sacnSocket.joined.has(addr)) {
-    log('debug', `[sACN] already joined ${addr}`);
-    return;
-  }
+  if (sacnSocket.joined.has(addr)) return;
   try {
     // Find the local LAN interface (non-loopback IPv4)
     let localIp = null;
@@ -3618,16 +3588,13 @@ function joinUniverse(universe) {
       const ipv4 = addrs.find(a => a.family === 'IPv4' && !a.internal);
       if (ipv4) {
         localIp = ipv4.address;
-        log('debug', `[sACN] found local interface ${ifname}: ${localIp}`);
         break;
       }
     }
     if (localIp) {
       sacnSocket.sock.addMembership(addr, localIp);
-      log('info', `[sACN] joined multicast ${addr} (universe ${universe}) on interface ${localIp}`);
     } else {
       sacnSocket.sock.addMembership(addr);
-      log('info', `[sACN] joined multicast ${addr} (universe ${universe}) (no local interface found)`);
     }
     sacnSocket.joined.add(addr);
   } catch (e) {
@@ -3842,31 +3809,17 @@ function startSacnListener() {
 
   sock.on('error', e => log('warn', `[sACN] socket error: ${e.message}`));
 
-  // Counter for debugging packet reception
-  let pktCount = 0;
   sock.on('message', (msg, rinfo) => {
-    pktCount++;
-    if (pktCount % 100 === 1) log('debug', `[sACN] raw packet #${pktCount} from ${rinfo.address}: ${msg.length} bytes`);
     const parsed = parseSacnPacket(msg);
-    if (!parsed) {
-      if (pktCount % 100 === 1) log('debug', `[sACN] packet #${pktCount} failed parse`);
-      return;
-    }
+    if (!parsed) return;
     const { universe, dmx } = parsed;
-    log('info', `[sACN] Received universe ${universe} from ${rinfo.address} (packet #${pktCount})`);
     // Find device assigned to this universe
     const reg = loadRegistry();
-    let found = false;
     for (const [mac, device] of Object.entries(reg.devices ?? {})) {
       if (device.sacnUniverse === universe) {
-        log('info', `[sACN] → matched to device "${device.name}" (${mac})`);
         sacnReceive(mac, dmx);
-        found = true;
-        break;
+        return;
       }
-    }
-    if (!found) {
-      log('warn', `[sACN] Universe ${universe} has no assigned device`);
     }
   });
 
