@@ -257,6 +257,9 @@ body.console-mode #console-body { display: block; }
   <button id="resume-console-btn" class="ctrl-override" onclick="resumeConsoleMode()" style="display:none;background:var(--accent2);color:#000">
     ● Resume Console
   </button>
+  <button id="switch-to-console-btn" class="ctrl-override" onclick="switchToConsoleMode()" style="display:none;background:var(--accent2);color:#000">
+    ● Switch to Console
+  </button>
   <span id="header-spacer"></span>
   <a href="/" style="font-size:10px;color:var(--muted);text-decoration:none;
      font-family:var(--mono)">← Main UI</a>
@@ -512,10 +515,12 @@ function setConsoleMode(active) {
   document.body.className = active ? 'console-mode' : '';
   const badge   = document.getElementById('status-badge');
   const takeBtn = document.getElementById('take-control-btn');
+  const switchBtn = document.getElementById('switch-to-console-btn');
   const shInfo  = document.getElementById('sh-console-info');
   if (active) {
     badge.className = 'console'; badge.textContent = '● CONSOLE';
     takeBtn.style.display = 'inline-block';
+    switchBtn.style.display = 'none';
     shInfo.style.display  = 'flex';
   } else {
     badge.className = 'manual'; badge.textContent = '○ MANUAL';
@@ -555,6 +560,10 @@ function onSacnUpdate(channels) {
   // Update folder active states
   updateFolderActiveStates(channels);
 
+  // In manual mode, don't update sliders from sACN — they reflect manual control only
+  // This prevents confusion where sACN updates show but device doesn't respond
+  if (!consoleMode) return;
+
   // Mirror VCP sliders in console mode (respecting locks)
   const vcp_map = [
     { name:'brightness', idx:3, id:'sl-brightness', lv:'lv-brightness' },
@@ -582,12 +591,21 @@ function onSacnUpdate(channels) {
 function takeManualControl() {
   consoleLost = false;
   document.getElementById('resume-console-btn').style.display = 'none';
+  document.getElementById('switch-to-console-btn').style.display = 'inline-block';
   setConsoleMode(false);
+}
+
+function switchToConsoleMode() {
+  // Operator can manually switch back to console mode without waiting for packets
+  document.getElementById('switch-to-console-btn').style.display = 'none';
+  document.body.className = '';
+  setConsoleMode(true);
 }
 
 function resumeConsoleMode() {
   consoleLost = false;
   document.getElementById('resume-console-btn').style.display = 'none';
+  document.getElementById('switch-to-console-btn').style.display = 'none';
   document.body.className = '';
   setConsoleMode(true);
 }
