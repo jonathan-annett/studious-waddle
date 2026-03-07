@@ -255,15 +255,9 @@ body.console-mode #console-body { display: block; }
 <div id="header">
   <h1 id="tv-name">DMX Dashboard</h1>
   <span id="universe-badge">Universe —</span>
-  <span id="status-badge" class="manual">○ MANUAL</span>
-  <button id="take-control-btn" class="ctrl-override" onclick="takeManualControl()">
-    Take Manual Control
-  </button>
-  <button id="resume-console-btn" class="ctrl-override" onclick="resumeConsoleMode()" style="display:none;background:var(--accent2);color:#000">
-    ● Resume Console
-  </button>
-  <button id="switch-to-console-btn" class="ctrl-override" onclick="switchToConsoleMode()" style="display:none;background:var(--accent2);color:#000">
-    ● Switch to Console
+  <span id="status-badge" class="console">● CONSOLE</span>
+  <button id="release-all-btn" class="ctrl-override" onclick="releaseAllControls()" style="display:none;background:var(--accent2);color:#000">
+    Release All Controls
   </button>
   <span id="header-spacer"></span>
   <a href="/" style="font-size:10px;color:var(--muted);text-decoration:none;
@@ -416,7 +410,7 @@ let folders     = [];     // [{ channel, name, folderPath, groupId? }]
 let tempFolders = [];     // [{ name, displayName }]
 let uploadFiles = [];
 let ws          = null;
-let consoleMode = false;  // true = sACN CH1 > 0
+let consoleActive = true;  // true = sACN packets being received, false = console lost
 let lastPacketMs = null;
 let packetTimeoutHandle = null;
 let currentChannels = new Array(512).fill(0);
@@ -424,8 +418,7 @@ let currentInput    = null; // last known input VCP code
 let currentPlaying  = null; // last known folder name
 const INPUT_NAMES   = { 0x11:'HDMI1', 0x12:'HDMI2', 0x0F:'DP1', 0x10:'DP2', 0x87:'Media Player' };
 
-// Console loss tracking
-let consoleLost = false;  // true = sACN packets were lost, now in manual mode
+// Console connection tracking
 const CONSOLE_LOST_TIMEOUT = 15000; // 15 seconds — sACNView has gaps in transmission
 
 // VCP state tracking
@@ -531,47 +524,27 @@ function initWs() {
 }
 
 // ── Console mode switching ─────────────────────────────────────────────────
-function setConsoleMode(active) {
-  consoleMode = active;
-  document.body.className = active ? 'console-mode' : '';
-  const badge   = document.getElementById('status-badge');
-  const takeBtn = document.getElementById('take-control-btn');
-  const switchBtn = document.getElementById('switch-to-console-btn');
-  const shInfo  = document.getElementById('sh-console-info');
-  if (active) {
-    badge.className = 'console'; badge.textContent = '● CONSOLE';
-    takeBtn.style.display = 'inline-block';
-    switchBtn.style.display = 'none';
-    shInfo.style.display  = 'flex';
-  } else {
-    badge.className = 'manual'; badge.textContent = '○ MANUAL';
-    takeBtn.style.display = 'none';
-    shInfo.style.display  = 'none';
-  }
-}
-
 function onSacnUpdate(channels) {
   currentChannels = channels;
   lastPacketMs    = Date.now();
   document.getElementById('sh-last-packet').textContent = 'live';
 
-  // If we were in "lost" state and packets resumed, show "Resume Console" button
-  if (consoleLost && !consoleMode) {
-    document.getElementById('resume-console-btn').style.display = 'inline-block';
+  // Console is active
+  if (!consoleActive) {
+    consoleActive = true;
+    document.body.className = '';
+    document.getElementById('status-badge').className = 'console';
+    document.getElementById('status-badge').textContent = '● CONSOLE';
   }
 
   // Reset packet timeout (15 seconds — sACNView has gaps)
   clearTimeout(packetTimeoutHandle);
   packetTimeoutHandle = setTimeout(() => {
-    if (consoleMode) {
-      consoleLost = true;
+    if (consoleActive) {
+      consoleActive = false;
       document.body.className = 'console-lost';
       document.getElementById('status-badge').className = 'lost';
-      document.getElementById('status-badge').textContent = '⚠ CONSOLE LOST — MANUAL';
-      document.getElementById('take-control-btn').style.display = 'none';
-      document.getElementById('resume-console-btn').style.display = 'none';
-      // After amber flash, switch fully to manual
-      setTimeout(() => { setConsoleMode(false); }, 1500);
+      document.getElementById('status-badge').textContent = '⚠ CONSOLE LOST';
     }
   }, CONSOLE_LOST_TIMEOUT);
 
@@ -581,7 +554,7 @@ function onSacnUpdate(channels) {
   // Update folder active states
   updateFolderActiveStates(channels);
 
-  // Track DMX values and update status displays (always, regardless of mode)
+  // Track DMX values and update status displays
   const vcp_map = [
     { name:'brightness', idx:3, id:'sl-brightness', lv:'lv-brightness' },
     { name:'contrast',   idx:4, id:'sl-contrast',   lv:'lv-contrast' },
@@ -594,18 +567,13 @@ function onSacnUpdate(channels) {
     const max = vcpMaxValues[v.name] || 255;
     const actual = Math.round((dmxValue / 255) * max);
     const pct = Math.round((actual / max) * 100);
-    vcpDmxValues[v.name] = pct;  // Store DMX percentage
+    vcpDmxValues[v.name] = pct;
     updateStatusDisplay(v.name);
   }
 
-  // In manual mode, don't update sliders from sACN — they reflect manual control only
-  if (!consoleMode) return;
-
-  // Mirror VCP sliders in console mode (respecting locks)
+  // Update sliders for unlocked controls (lock state determines control, not mode)
   for (const v of vcp_map) {
-    // Skip if this control is locked
-    if (vcpLockedState[v.name]) continue;
-
+    if (vcpLockedState[v.name]) continue;  // Skip locked controls
     const pct = vcpDmxValues[v.name];
     const sl = document.getElementById(v.id);
     const lv = document.getElementById(v.lv);
@@ -614,26 +582,19 @@ function onSacnUpdate(channels) {
   }
 }
 
-function takeManualControl() {
-  consoleLost = false;
-  document.getElementById('resume-console-btn').style.display = 'none';
-  document.getElementById('switch-to-console-btn').style.display = 'inline-block';
-  setConsoleMode(false);
-}
-
-function switchToConsoleMode() {
-  // Operator can manually switch back to console mode without waiting for packets
-  document.getElementById('switch-to-console-btn').style.display = 'none';
-  document.body.className = '';
-  setConsoleMode(true);
-}
-
-function resumeConsoleMode() {
-  consoleLost = false;
-  document.getElementById('resume-console-btn').style.display = 'none';
-  document.getElementById('switch-to-console-btn').style.display = 'none';
-  document.body.className = '';
-  setConsoleMode(true);
+function releaseAllControls() {
+  // Unlock all controls to let console take over again
+  for (const name in VCP_CONTROLS) {
+    vcpLockedState[name] = false;
+    const lockBtn = document.getElementById(`lock-${name}`);
+    if (lockBtn) {
+      lockBtn.classList.remove('locked');
+      lockBtn.textContent = '🔓';
+    }
+    updateStatusDisplay(name);
+  }
+  // Hide the button
+  document.getElementById('release-all-btn').style.display = 'none';
 }
 
 function toggleLock(controlName) {
@@ -672,7 +633,6 @@ function updateStatusDisplay(controlName) {
   const statusEl = document.getElementById(`status-${controlName}`);
   if (!statusEl) return;
 
-  const mode = consoleMode ? 'console' : 'manual';
   const dmxPct = vcpDmxValues[controlName] ?? 0;
   const devicePct = vcpDeviceValues[controlName] ?? 0;
   const defaultPct = vcpInitialValues[controlName] ?? 0;
@@ -681,7 +641,11 @@ function updateStatusDisplay(controlName) {
   const dmxChannel = 3 + Object.keys(VCP_CONTROLS).indexOf(controlName);
   const uniChannel = `DMX 1:${dmxChannel + 1}`;
 
-  statusEl.textContent = `(${mode}) ${uniChannel}  ${dmxPct}% → ${devicePct}%,  default ${defaultPct}%${locked}`;
+  statusEl.textContent = `${uniChannel}  ${dmxPct}% → ${devicePct}%,  default ${defaultPct}%${locked}`;
+
+  // Show Release All Controls button if any control is locked
+  const anyLocked = Object.values(vcpLockedState).some(x => x);
+  document.getElementById('release-all-btn').style.display = anyLocked ? 'inline-block' : 'none';
 }
 
 // ── Folder management ──────────────────────────────────────────────────────
@@ -997,10 +961,20 @@ async function doInput(code) {
 
 function onSlider(name, value) {
   document.getElementById(`lv-${name}`).textContent = value + '%';
+  // Auto-lock when user manually adjusts — signals intent to override console
+  if (!vcpLockedState[name]) {
+    vcpLockedState[name] = true;
+    const lockBtn = document.getElementById(`lock-${name}`);
+    if (lockBtn) {
+      lockBtn.classList.add('locked');
+      lockBtn.textContent = '🔒';
+    }
+    updateStatusDisplay(name);
+  }
 }
 
 async function doVcp(page, code, value) {
-  if (!sessionId || consoleMode) return;
+  if (!sessionId) return;
   try {
     // Find which VCP control this is and scale properly
     let scaledValue = parseInt(value);
