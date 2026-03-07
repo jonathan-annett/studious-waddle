@@ -42,13 +42,15 @@ const config = {
 // Merge devices from JSON into live state objects
 const devices = (rawCfg.devices || []).map(d => ({
   ...d,
-  power:       d.power ?? 'on',
-  input:       typeof d.input === 'number' ? d.input : 0x11,
-  vcpValues:   {},
-  emergency:   false,
+  power:        d.power ?? 'on',
+  input:        typeof d.input === 'number' ? d.input : 0x11,
+  vcpValues:    {},
+  emergency:    false,
   replyDelayMs: d.replyDelayMs ?? 5,
-  connected:   true,   // simulates CAT5 cable plugged in
-  // player state is initialised by createPlayerHttpServer
+  connected:    d.mode === 'proxy' ? false : true,
+  orientation:  d.orientation ?? 'landscape',
+  mode:         d.mode ?? 'simulated',
+  // player state is initialised by createPlayerHttpServer (simulated only)
   player: null,
 }));
 
@@ -133,10 +135,160 @@ function notifyRouter(device, up = true) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Router WebSocket client — proxy mode
+// Connects to the router's UI WebSocket to receive real-time device state
+// updates for proxy devices (matched by MAC address).
+// ─────────────────────────────────────────────────────────────────────────────
+
+import crypto from 'node:crypto';
+
+/** Build a MAC→device lookup for proxy devices */
+function buildProxyMap() {
+  const map = new Map();
+  for (const d of devices) {
+    if (d.mode === 'proxy') map.set(d.mac.toLowerCase().replace(/[^a-f0-9]/g, ''), d);
+  }
+  return map;
+}
+
+const proxyByMac = buildProxyMap();
+
+/** Handle a message from the router's WebSocket */
+function handleRouterWsMessage(msg) {
+  if (!msg || !msg.type) return;
+
+  // Normalise MAC for matching (strip colons, lowercase)
+  const rawMac = msg.mac || msg.data?.mac;
+  if (!rawMac) return;
+  const normMac = rawMac.toLowerCase().replace(/[^a-f0-9]/g, '');
+  const device = proxyByMac.get(normMac);
+  if (!device) return;
+
+  if (msg.type === 'device-online' || msg.type === 'device-discovered') {
+    device.connected = true;
+    if (msg.power  !== undefined) device.power  = msg.power;
+    if (msg.name   !== undefined) device.name   = msg.name;
+    if (msg.ip     !== undefined) device.tvIP   = msg.ip;
+    if (msg.model  !== undefined) device.model  = msg.model;
+    if (msg.serial !== undefined) device.serial = msg.serial;
+    if (msg.firmware !== undefined) device.firmware = msg.firmware;
+    log(`[proxy] ${device.name || device.id} online (power: ${device.power})`);
+    broadcast({ type: 'device-update', device: devicePublic(device) });
+
+  } else if (msg.type === 'device-offline') {
+    device.connected = false;
+    log(`[proxy] ${device.name || device.id} offline`);
+    broadcast({ type: 'device-update', device: devicePublic(device) });
+
+  } else if (msg.type === 'device-quarantined') {
+    device.connected = true;
+    device.firmware = msg.firmware || device.firmware;
+    log(`[proxy] ${device.name || device.id} quarantined (fw: ${device.firmware})`);
+    broadcast({ type: 'device-update', device: devicePublic(device) });
+  }
+}
+
+/** Parse one WebSocket frame from buffer. Returns { opcode, payload, consumed } or null. */
+function parseWsFrame(buf) {
+  if (buf.length < 2) return null;
+  const opcode     = buf[0] & 0x0F;
+  let payloadLen   = buf[1] & 0x7F;
+  let offset       = 2;
+
+  if (payloadLen === 126) {
+    if (buf.length < 4) return null;
+    payloadLen = buf.readUInt16BE(2);
+    offset = 4;
+  } else if (payloadLen === 127) {
+    if (buf.length < 10) return null;
+    payloadLen = Number(buf.readBigUInt64BE(2));
+    offset = 10;
+  }
+
+  const totalLen = offset + payloadLen;
+  if (buf.length < totalLen) return null;
+
+  return { opcode, payload: buf.slice(offset, totalLen), consumed: totalLen };
+}
+
+let routerWsSocket = null;
+
+/** Connect to the router's UI WebSocket and listen for device events. */
+function connectRouterWs() {
+  if (!config.routerUrl || proxyByMac.size === 0) return;
+
+  const url   = new URL(config.routerUrl);
+  const wsKey = crypto.randomBytes(16).toString('base64');
+
+  const req = http.request({
+    hostname: url.hostname,
+    port:     url.port || 80,
+    path:     '/',
+    headers: {
+      'Connection':            'Upgrade',
+      'Upgrade':               'websocket',
+      'Sec-WebSocket-Key':     wsKey,
+      'Sec-WebSocket-Version': '13',
+    },
+  });
+
+  req.on('upgrade', (_res, socket, head) => {
+    routerWsSocket = socket;
+    log(`[proxy] Connected to router WebSocket at ${config.routerUrl}`);
+
+    let buf = head.length ? Buffer.from(head) : Buffer.alloc(0);
+
+    socket.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+
+      let frame;
+      while ((frame = parseWsFrame(buf)) !== null) {
+        buf = buf.slice(frame.consumed);
+
+        if (frame.opcode === 0x01) { // text
+          try {
+            const msg = JSON.parse(frame.payload.toString('utf8'));
+            handleRouterWsMessage(msg);
+          } catch {}
+        } else if (frame.opcode === 0x09) { // ping → pong
+          const pong = Buffer.alloc(2);
+          pong[0] = 0x8A; pong[1] = 0x00; // unmasked empty pong (server allows)
+          socket.write(pong);
+        } else if (frame.opcode === 0x08) { // close
+          socket.end();
+          return;
+        }
+      }
+    });
+
+    socket.on('close', () => {
+      routerWsSocket = null;
+      log('[proxy] Router WebSocket closed, reconnecting in 5s');
+      setTimeout(connectRouterWs, 5000);
+    });
+
+    socket.on('error', (err) => {
+      routerWsSocket = null;
+      log(`[proxy] Router WebSocket error: ${err.message}`);
+    });
+  });
+
+  req.on('error', (err) => {
+    log(`[proxy] Router WS connection failed: ${err.message} — retrying in 10s`);
+    setTimeout(connectRouterWs, 10000);
+  });
+
+  req.end();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Start per-device servers
 // ─────────────────────────────────────────────────────────────────────────────
 
-for (const device of devices) {
+const simDevices   = devices.filter(d => d.mode !== 'proxy');
+const proxyDevices = devices.filter(d => d.mode === 'proxy');
+
+for (const device of simDevices) {
   const onLog = (msg) => log(msg);
 
   createNecServer(device, { port: config.necPort, onLog });
@@ -144,13 +296,11 @@ for (const device of devices) {
   createPlayerHttpServer(device, { port: config.playerHttpPort, onLog });
 }
 
-log(`[sim] started ${devices.length} virtual device(s)`);
+log(`[sim] started ${simDevices.length} simulated + ${proxyDevices.length} proxy device(s)`);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Minimal WebSocket server (no npm — hand-rolled upgrade / framing)
 // ─────────────────────────────────────────────────────────────────────────────
-
-import crypto from 'node:crypto';
 
 function wsHandshake(req, socket) {
   const key    = req.headers['sec-websocket-key'];
@@ -213,20 +363,36 @@ function readBodyJson(req) {
 }
 
 function devicePublic(d) {
+  // Build root folder listing from player filesystem
+  const rootFiles = [];
+  if (d.player?.fs?.children) {
+    for (const [, entry] of d.player.fs.children) {
+      rootFiles.push({
+        name: entry.name,
+        type: entry.type, // 0=folder, 1=file
+        size: entry.size,
+        fileCount: entry.children ? entry.children.size : 0,
+      });
+    }
+  }
+
   return {
     id:          d.id,
     name:        d.name,
     tvIP:        d.tvIP,
     playerIP:    d.playerIP,
     mac:         d.mac,
-    model:       d.model,
-    serial:      d.serial,
-    firmware:    d.firmware,
+    model:       d.model ?? null,
+    serial:      d.serial ?? null,
+    firmware:    d.firmware ?? null,
     power:       d.power,
     input:       d.input,
     emergency:   d.emergency,
     connected:   d.connected,
+    orientation: d.orientation,
+    mode:        d.mode,
     replyDelayMs: d.replyDelayMs,
+    rootFiles,
     player: d.player ? {
       cwdPath:        d.player.cwdPath,
       autoPlayMode:   d.player.settings.autoPlayMode,
@@ -286,6 +452,7 @@ const simServer = http.createServer(async (req, res) => {
     if (body.input       !== undefined) device.input        = body.input;
     if (body.firmware    !== undefined) device.firmware     = body.firmware;
     if (body.replyDelayMs !== undefined) device.replyDelayMs = body.replyDelayMs;
+    if (body.orientation !== undefined) device.orientation   = body.orientation;
 
     if (body.serveHtmlFor !== undefined && device.player) {
       device.player.serveHtmlFor = body.serveHtmlFor;
@@ -403,17 +570,23 @@ simServer.listen(simPort, '0.0.0.0', () => {
   log(`[sim] NEC port: ${config.necPort}  |  TV HTTP: ${config.tvHttpPort}  |  Player HTTP: ${config.playerHttpPort}`);
   log(`[sim] Open http://${config.server}:${simPort} in your browser`);
 
-  // After a short delay, notify the router about all connected devices (simulates power-on / cable plug-in)
+  // After a short delay, notify the router about all connected simulated devices
   if (config.routerUrl) {
     log(`[sim] Router URL: ${config.routerUrl} — will notify in 3s`);
     setTimeout(() => {
-      for (const device of devices) {
+      for (const device of simDevices) {
         if (device.connected) {
           log(`[sim] Startup: notifying router about ${device.name}`);
           notifyRouter(device, true);
         }
       }
     }, 3000);
+
+    // Connect to router WebSocket for proxy device updates
+    if (proxyByMac.size > 0) {
+      log(`[sim] ${proxyByMac.size} proxy device(s) — connecting to router WebSocket`);
+      setTimeout(connectRouterWs, 1000);
+    }
   } else {
     log(`[sim] No routerUrl configured — router notifications disabled`);
   }

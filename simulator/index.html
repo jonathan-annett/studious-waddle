@@ -8,7 +8,7 @@
   :root {
     --bg: #1a1a2e; --card: #16213e; --border: #0f3460;
     --accent: #e94560; --ok: #4caf50; --warn: #ff9800; --muted: #7f8c8d;
-    --text: #ecf0f1; --text2: #bdc3c7;
+    --text: #ecf0f1; --text2: #bdc3c7; --blue: #2196f3;
     --input-bg: #0d1b2a; --radius: 6px; --mono: 'Courier New', monospace;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -29,25 +29,59 @@
   .panel-body { padding: 14px; overflow-y: auto; flex: 1; }
 
   /* Device cards */
-  .device-grid { display: flex; flex-direction: column; gap: 12px; }
+  .device-grid { display: flex; flex-direction: column; gap: 14px; }
   .device-card {
     background: var(--input-bg); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+    padding: 14px;
   }
   .device-card.offline { border-color: var(--accent); opacity: 0.7; }
-  .device-name { font-weight: 700; font-size: 15px; grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); display: inline-block; }
+  .device-card.disconnected { border-color: var(--accent); opacity: 0.5; }
+  .device-card.proxy-card { border-color: var(--blue); border-style: dashed; }
+  .device-name { font-weight: 700; font-size: 15px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); display: inline-block; flex-shrink: 0; }
   .dot.off { background: var(--muted); }
   .dot.warn { background: var(--warn); }
 
+  /* Display + folder row */
+  .display-row { display: flex; gap: 12px; margin-bottom: 10px; align-items: flex-start; }
+  .display-panel {
+    background: #000; border: 2px solid #333; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-family: var(--mono); font-size: 14px;
+    text-align: center; overflow: hidden; flex-shrink: 0;
+    position: relative;
+  }
+  .display-panel.landscape { width: 240px; aspect-ratio: 16/9; }
+  .display-panel.portrait  { width: 120px; aspect-ratio: 9/16; }
+  .display-panel.powered-off { border-color: #222; }
+  .display-panel.powered-off .display-content { opacity: 0.15; }
+  .display-content {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    width: 100%; height: 100%; padding: 8px;
+  }
+  .display-input { font-size: 20px; font-weight: 700; color: #555; }
+  .display-folder { font-size: 12px; color: var(--ok); }
+  .display-label { font-size: 10px; color: #444; margin-top: 2px; }
+  .display-playing { color: var(--ok); font-size: 16px; font-weight: 700; }
+  .display-idle { color: #444; font-size: 13px; }
+
+  /* Folder listing */
+  .folder-listing { flex: 1; min-width: 0; max-height: 200px; overflow-y: auto; }
+  .folder-listing h4 { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
+  .folder-entry { font-size: 12px; font-family: var(--mono); padding: 2px 0; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .folder-entry .fe-icon { margin-right: 4px; }
+  .folder-entry .fe-count { color: var(--muted); font-size: 11px; margin-left: 4px; }
+
+  /* Info fields grid */
+  .fields-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin-bottom: 8px; }
   .field { font-size: 12px; }
-  .field label { color: var(--muted); display: block; font-size: 11px; margin-bottom: 2px; }
+  .field label { color: var(--muted); display: block; font-size: 11px; margin-bottom: 1px; }
   .field span { color: var(--text); font-family: var(--mono); font-size: 12px; }
 
-  .device-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 4px; }
+  .device-actions { display: flex; flex-wrap: wrap; gap: 6px; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 4px; }
 
   /* Fault Injection Section */
-  .fault-section { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 4px; }
+  .fault-section { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 4px; }
   .fault-section h4 { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
   .fault-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .fault-row label { font-size: 12px; color: var(--text2); }
@@ -65,6 +99,9 @@
   button.primary:hover { background: rgba(76,175,80,.15); }
   button.warn { border-color: var(--warn); color: var(--warn); }
   button.warn:hover { background: rgba(255,152,0,.15); }
+  button.blue { border-color: var(--blue); color: var(--blue); }
+  button.blue:hover { background: rgba(33,150,243,.15); }
+  button.sm { padding: 3px 8px; font-size: 11px; }
 
   /* Inputs */
   input[type=number], input[type=text], select {
@@ -84,10 +121,9 @@
   .badge.on  { background: rgba(76,175,80,.2); color: var(--ok); }
   .badge.off { background: rgba(127,140,141,.15); color: var(--muted); }
   .badge.em  { background: rgba(233,69,96,.2); color: var(--accent); }
-  .badge.cable-on { background: rgba(33,150,243,.2); color: #2196f3; }
+  .badge.cable-on { background: rgba(33,150,243,.2); color: var(--blue); }
   .badge.cable-off { background: rgba(233,69,96,.2); color: var(--accent); }
-
-  .device-card.disconnected { border-color: var(--accent); opacity: 0.5; }
+  .badge.proxy { background: rgba(33,150,243,.15); color: var(--blue); }
 
   #log-panel-wrap { display: flex; flex-direction: column; }
   .log-controls { padding: 8px 14px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
@@ -96,13 +132,13 @@
 </head>
 <body>
 <header>
-  <h1>⚡ NEC Display Simulator</h1>
-  <span id="ws-status">● connecting…</span>
+  <h1>NEC Display Simulator</h1>
+  <span id="ws-status">connecting…</span>
 </header>
 <main>
   <!-- Left: device cards -->
   <div class="panel">
-    <div class="panel-header">🖥 Virtual Devices</div>
+    <div class="panel-header">Virtual Devices</div>
     <div class="panel-body">
       <div class="device-grid" id="device-grid">
         <p style="color:var(--muted)">Connecting to simulator…</p>
@@ -112,7 +148,7 @@
 
   <!-- Right: log -->
   <div class="panel" id="log-panel-wrap">
-    <div class="panel-header">📋 Command Log <span id="log-count" style="font-weight:400;color:var(--muted);font-size:11px;margin-left:auto"></span></div>
+    <div class="panel-header">Command Log <span id="log-count" style="font-weight:400;color:var(--muted);font-size:11px;margin-left:auto"></span></div>
     <div class="log-controls">
       <input type="text" id="log-filter" placeholder="filter…">
       <button onclick="clearLogDisplay()">Clear</button>
@@ -146,13 +182,13 @@ function connectWS() {
 
   ws.onopen = () => {
     wsOk = true;
-    document.getElementById('ws-status').textContent = '● connected';
+    document.getElementById('ws-status').textContent = 'connected';
     document.getElementById('ws-status').classList.add('connected');
   };
 
   ws.onclose = () => {
     wsOk = false;
-    document.getElementById('ws-status').textContent = '● disconnected';
+    document.getElementById('ws-status').textContent = 'disconnected';
     document.getElementById('ws-status').classList.remove('connected');
     setTimeout(connectWS, 2000);
   };
@@ -197,7 +233,7 @@ async function resetFs(id) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Render
+// Render helpers
 // ─────────────────────────────────────────────────────────────────────────────
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -209,6 +245,60 @@ function powerBadge(p) {
   return `<span class="badge off">${esc(p)}</span>`;
 }
 
+/** Determine what the display panel should show */
+function getDisplayContent(d) {
+  if (d.connected === false) {
+    return `<div class="display-input" style="color:#555">NO SIGNAL</div>`;
+  }
+  if (d.power === 'off' || d.power === 'standby') {
+    return `<div class="display-input" style="color:#222">${esc(d.power).toUpperCase()}</div>`;
+  }
+  if (d.emergency) {
+    return `<div class="display-playing" style="color:var(--accent)">EMERGENCY</div>
+            <div class="display-label">contents active</div>`;
+  }
+  const input = d.input;
+  if (input === 0x87) {
+    // Media Player active
+    const folder = d.player?.autoPlayFolder;
+    if (folder && d.player?.autoPlayMode === 1) {
+      const name = folder.split('/').pop();
+      return `<div class="display-playing">${esc(name)}</div>
+              <div class="display-label">slideshow active</div>`;
+    }
+    return `<div class="display-idle">MediaPlayer</div>
+            <div class="display-label">idle</div>`;
+  }
+  // External input
+  return `<div class="display-input">${esc(inputName(input))}</div>
+          <div class="display-label">external input</div>`;
+}
+
+/** Build folder listing HTML */
+function renderFolderList(d) {
+  const files = d.rootFiles || [];
+  if (!files.length) {
+    if (d.mode === 'proxy') return '<h4>SD Card</h4><div class="folder-entry" style="color:var(--muted)">not available</div>';
+    return '<h4>SD Card</h4><div class="folder-entry" style="color:var(--muted)">empty</div>';
+  }
+  let html = '<h4>SD Card Contents</h4>';
+  for (const f of files) {
+    if (f.type === 0) {
+      // Folder
+      const count = f.fileCount || 0;
+      html += `<div class="folder-entry"><span class="fe-icon">📁</span>${esc(f.name)}<span class="fe-count">(${count} file${count !== 1 ? 's' : ''})</span></div>`;
+    } else {
+      // File
+      const sizeKB = Math.ceil((f.size || 0) / 1024);
+      html += `<div class="folder-entry"><span class="fe-icon">📄</span>${esc(f.name)}<span class="fe-count">${sizeKB}KB</span></div>`;
+    }
+  }
+  return html;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Render devices
+// ─────────────────────────────────────────────────────────────────────────────
 function renderDevices() {
   const grid = document.getElementById('device-grid');
   grid.innerHTML = '';
@@ -224,41 +314,67 @@ function renderDevice(d) {
   const el = document.getElementById(`dev-${d.id}`);
   if (!el) { renderDevices(); return; }
 
-  const isEm = d.emergency;
+  const isEm       = d.emergency;
   const isCableOff = d.connected === false;
-  const dotClass = isCableOff ? 'off' : (d.power === 'on' ? (isEm ? 'warn' : '') : 'off');
-  const pl = d.player || {};
+  const isProxy    = d.mode === 'proxy';
+  const isPoweredOff = d.power === 'off' || d.power === 'standby';
+  const dotClass   = isCableOff ? 'off' : (d.power === 'on' ? (isEm ? 'warn' : '') : 'off');
+  const orient     = d.orientation || 'landscape';
+  const pl         = d.player || {};
 
-  el.className = `device-card${isCableOff ? ' disconnected' : (d.power === 'off' ? ' offline' : '')}`;
-  el.innerHTML = `
-    <div class="device-name">
-      <span class="dot ${esc(dotClass)}"></span>
-      ${esc(d.name)}
-      ${powerBadge(d.power)}
-      ${isCableOff ? '<span class="badge cable-off">🔌 DISCONNECTED</span>' : '<span class="badge cable-on">🔗 CONNECTED</span>'}
-      ${isEm ? '<span class="badge em">🚨 EMERGENCY</span>' : ''}
-    </div>
+  let cardClass = 'device-card';
+  if (isProxy) cardClass += ' proxy-card';
+  if (isCableOff) cardClass += ' disconnected';
+  else if (isPoweredOff) cardClass += ' offline';
 
-    <div class="field"><label>TV IP</label><span>${esc(d.tvIP)}</span></div>
-    <div class="field"><label>Player IP</label><span>${esc(d.playerIP)}</span></div>
-    <div class="field"><label>MAC</label><span>${esc(d.mac)}</span></div>
-    <div class="field"><label>Model / Firmware</label><span>${esc(d.model)} / ${esc(d.firmware)}</span></div>
-    <div class="field"><label>Input</label><span>${esc(inputName(d.input))} (0x${d.input.toString(16).toUpperCase()})</span></div>
-    <div class="field"><label>Player dir</label><span>${esc(pl.cwdPath || '—')}</span></div>
-    <div class="field"><label>AutoPlay folder</label><span>${esc(pl.autoPlayFolder || '—')}</span></div>
-    <div class="field"><label>AutoPlay mode</label><span>${pl.autoPlayMode ?? '—'}</span></div>
+  el.className = cardClass;
 
+  // ── Header ──
+  let badges = powerBadge(d.power);
+  if (isProxy) {
+    badges += ' <span class="badge proxy">PROXY</span>';
+  }
+  if (isCableOff) {
+    badges += ' <span class="badge cable-off">DISCONNECTED</span>';
+  } else if (!isProxy) {
+    badges += ' <span class="badge cable-on">LINKED</span>';
+  }
+  if (isEm) badges += ' <span class="badge em">EMERGENCY</span>';
+
+  // ── Display panel ──
+  const displayClass = `display-panel ${orient}${isPoweredOff || isCableOff ? ' powered-off' : ''}`;
+  const displayContent = getDisplayContent(d);
+
+  // ── Folder listing ──
+  const folderHtml = renderFolderList(d);
+
+  // ── Actions (simulated devices only) ──
+  let actionsHtml = '';
+  if (!isProxy) {
+    actionsHtml = `
     <div class="device-actions">
-      <button class="primary" onclick="setPower('${esc(d.id)}', 'on')">Power On</button>
-      <button class="danger"  onclick="setPower('${esc(d.id)}', 'off')">Power Off</button>
-      <button onclick="setPower('${esc(d.id)}', 'standby')">Standby</button>
-      <button onclick="resetFs('${esc(d.id)}')">Reset FS</button>
+      <button class="primary sm" onclick="setPower('${esc(d.id)}', 'on')">Power On</button>
+      <button class="danger sm"  onclick="setPower('${esc(d.id)}', 'off')">Power Off</button>
+      <button class="sm" onclick="setPower('${esc(d.id)}', 'standby')">Standby</button>
+      <button class="sm" onclick="resetFs('${esc(d.id)}')">Reset FS</button>
       ${isCableOff
-        ? `<button class="primary" onclick="setCable('${esc(d.id)}', true)">Connect Cable</button>`
-        : `<button class="danger" onclick="setCable('${esc(d.id)}', false)">Disconnect Cable</button>`
+        ? `<button class="primary sm" onclick="setCable('${esc(d.id)}', true)">Connect Cable</button>`
+        : `<button class="danger sm" onclick="setCable('${esc(d.id)}', false)">Disconnect Cable</button>`
       }
-    </div>
+      <button class="blue sm" onclick="toggleOrientation('${esc(d.id)}')">${orient === 'landscape' ? '↻ Portrait' : '↺ Landscape'}</button>
+    </div>`;
+  } else {
+    // Proxy: only orientation toggle
+    actionsHtml = `
+    <div class="device-actions">
+      <button class="blue sm" onclick="toggleOrientation('${esc(d.id)}')">${orient === 'landscape' ? '↻ Portrait' : '↺ Landscape'}</button>
+    </div>`;
+  }
 
+  // ── Fault injection (simulated only) ──
+  let faultHtml = '';
+  if (!isProxy) {
+    faultHtml = `
     <div class="fault-section">
       <h4>Fault Injection</h4>
       <div class="fault-row">
@@ -270,11 +386,42 @@ function renderDevice(d) {
           onchange="setServeHtmlFor('${esc(d.id)}', this.value)">
       </div>
       <div class="fault-row" style="margin-top:8px">
-        <button class="warn" onclick="triggerRestart('${esc(d.id)}')">Trigger Player Restart</button>
-        <button class="warn" onclick="setFirmware('${esc(d.id)}')">Wrong Firmware</button>
-        <button onclick="resetFirmware('${esc(d.id)}')">Correct Firmware</button>
+        <button class="warn sm" onclick="triggerRestart('${esc(d.id)}')">Trigger Player Restart</button>
+        <button class="warn sm" onclick="setFirmware('${esc(d.id)}')">Wrong Firmware</button>
+        <button class="sm" onclick="resetFirmware('${esc(d.id)}')">Correct Firmware</button>
       </div>
+    </div>`;
+  }
+
+  el.innerHTML = `
+    <div class="device-name">
+      <span class="dot ${esc(dotClass)}"></span>
+      ${esc(d.name)}
+      ${badges}
     </div>
+
+    <div class="display-row">
+      <div class="${esc(displayClass)}">
+        <div class="display-content">${displayContent}</div>
+      </div>
+      <div class="folder-listing">${folderHtml}</div>
+    </div>
+
+    <div class="fields-grid">
+      <div class="field"><label>TV IP</label><span>${esc(d.tvIP || '—')}</span></div>
+      <div class="field"><label>Player IP</label><span>${esc(d.playerIP || '—')}</span></div>
+      <div class="field"><label>MAC</label><span>${esc(d.mac)}</span></div>
+      <div class="field"><label>Model / Firmware</label><span>${esc(d.model || '?')} / ${esc(d.firmware || '?')}</span></div>
+      <div class="field"><label>Input</label><span>${esc(inputName(d.input))} (0x${d.input.toString(16).toUpperCase()})</span></div>
+      <div class="field"><label>Orientation</label><span>${esc(orient)}</span></div>
+      ${!isProxy ? `
+      <div class="field"><label>AutoPlay folder</label><span>${esc(pl.autoPlayFolder || '—')}</span></div>
+      <div class="field"><label>AutoPlay mode</label><span>${pl.autoPlayMode ?? '—'}</span></div>
+      ` : ''}
+    </div>
+
+    ${actionsHtml}
+    ${faultHtml}
   `;
 }
 
@@ -290,6 +437,13 @@ async function setCable(id, connected) {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ connected }),
   });
+}
+
+async function toggleOrientation(id) {
+  const d = devices.find(x => x.id === id);
+  if (!d) return;
+  const newOrient = (d.orientation || 'landscape') === 'landscape' ? 'portrait' : 'landscape';
+  await apiPut(id, { orientation: newOrient });
 }
 
 async function setDelay(id, ms) {
