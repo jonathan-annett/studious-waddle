@@ -3536,8 +3536,8 @@ function parseSacnPacket(buf) {
     log('debug', `[sACN parse] bad preamble: ${hex(preamble)} !== 0x0010`);
     return null;
   }
-  // ACN packet identifier: "ASC-E1.17\0\0\0" at bytes 4–15
-  const ACN_ID = Buffer.from([0x41,0x73,0x63,0x2D,0x45,0x31,0x2E,0x31,0x37,0x00,0x00,0x00]);
+  // ACN packet identifier: "ASC-E1.17\0\0\0" at bytes 4–15 (uppercase)
+  const ACN_ID = Buffer.from([0x41,0x53,0x43,0x2D,0x45,0x31,0x2E,0x31,0x37,0x00,0x00,0x00]);
   if (!buf.slice(4, 16).equals(ACN_ID)) {
     log('debug', `[sACN parse] bad ACN ID: ${buf.slice(4, 16).toString('hex')} !== ${ACN_ID.toString('hex')}`);
     return null;
