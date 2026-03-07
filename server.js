@@ -3577,11 +3577,19 @@ async function getSacnSession(mac) {
 
 /** Join a multicast group for a universe (idempotent). */
 function joinUniverse(universe) {
-  if (!sacnSocket.sock) return;
+  if (!sacnSocket.sock) { log('warn', `[sACN] socket not ready, cannot join universe ${universe}`); return; }
   const addr = sacnMulticastAddr(universe);
-  if (sacnSocket.joined.has(addr)) return;
-  try { sacnSocket.sock.addMembership(addr); sacnSocket.joined.add(addr); }
-  catch (e) { log('warn', `[sACN] addMembership ${addr} failed: ${e.message}`); }
+  if (sacnSocket.joined.has(addr)) {
+    log('debug', `[sACN] already joined ${addr}`);
+    return;
+  }
+  try {
+    sacnSocket.sock.addMembership(addr);
+    sacnSocket.joined.add(addr);
+    log('info', `[sACN] joined multicast ${addr} (universe ${universe})`);
+  } catch (e) {
+    log('warn', `[sACN] addMembership ${addr} failed: ${e.message}`);
+  }
 }
 
 /** Leave a multicast group for a universe. */
@@ -3815,10 +3823,14 @@ function startSacnListener() {
   sock.on('listening', () => {
     // Join multicast groups for all currently registered universes
     const reg = loadRegistry();
+    const universes = [];
     for (const device of Object.values(reg.devices ?? {})) {
-      if (device.sacnUniverse) joinUniverse(device.sacnUniverse);
+      if (device.sacnUniverse) {
+        joinUniverse(device.sacnUniverse);
+        universes.push(device.sacnUniverse);
+      }
     }
-    log('info', `[sACN] listening on UDP :${SACN_PORT}`);
+    log('info', `[sACN] listening on UDP :${SACN_PORT}, joined multicast for universes: ${universes.join(', ')}`);
   });
 
   sock.bind(SACN_PORT);
