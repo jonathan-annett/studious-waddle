@@ -58,6 +58,8 @@ const CACHE_DIR   = process.env.NEC_CACHE_DIR
   : path.join(PROJECT_DIR, 'cache');
 const PIN_FILE    = path.join(PROJECT_DIR, '.pin'); // written by /api/rollback, read by ./run --dev
 
+const REGISTRY_FILE = path.join(CACHE_DIR, 'registry.json');
+
 // Ensure cache directory exists
 fs.mkdirSync(CACHE_DIR, { recursive: true });
 
@@ -74,8 +76,6 @@ console.log(`[startup] Registry file exists: ${fs.existsSync(REGISTRY_FILE) ? 'y
 // The "all" pseudo-group is never stored here — it is computed on demand
 // as every sha256 currently in the cache.
 // ─────────────────────────────────────────────────────────────────────────────
-
-const REGISTRY_FILE = path.join(CACHE_DIR, 'registry.json');
 
 function loadRegistry() {
   try {
