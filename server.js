@@ -17,6 +17,7 @@ import net     from 'node:net';
 import os      from 'node:os';
 import path    from 'node:path';
 import { URL } from 'node:url';
+import zlib   from 'node:zlib';
 
 import {
   openTcpSession,
@@ -434,6 +435,453 @@ function wsFrame(payload) {
     header.writeBigUInt64BE(BigInt(len), 2);
   }
   return Buffer.concat([header, payload]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pure-Node PNG generation (zero deps — uses built-in zlib only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const _crcTable = new Uint32Array(256);
+for (let n = 0; n < 256; n++) {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+  _crcTable[n] = c;
+}
+function crc32(buf) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) crc = _crcTable[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+  const typeB = Buffer.from(type, 'ascii');
+  const crcB  = Buffer.alloc(4); crcB.writeUInt32BE(crc32(Buffer.concat([typeB, data])));
+  return Buffer.concat([len, typeB, data, crcB]);
+}
+
+function createPNG(width, height, rgbaPixels) {
+  const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = 6; // 8-bit RGBA
+  const raw = Buffer.alloc(height * (1 + width * 4));
+  for (let y = 0; y < height; y++) {
+    raw[y * (1 + width * 4)] = 0; // filter: None
+    rgbaPixels.copy(raw, y * (1 + width * 4) + 1, y * width * 4, (y + 1) * width * 4);
+  }
+  return Buffer.concat([sig, pngChunk('IHDR', ihdr), pngChunk('IDAT', zlib.deflateSync(raw)), pngChunk('IEND', Buffer.alloc(0))]);
+}
+
+// 5×7 bitmap font — each glyph is 7 rows, each row is 5 bits (MSB = left pixel)
+const BITMAP_FONT = {
+  ' ': [0x00,0x00,0x00,0x00,0x00,0x00,0x00],
+  'A': [0x04,0x0A,0x11,0x11,0x1F,0x11,0x11],
+  'B': [0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E],
+  'C': [0x0E,0x11,0x10,0x10,0x10,0x11,0x0E],
+  'D': [0x1E,0x11,0x11,0x11,0x11,0x11,0x1E],
+  'E': [0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F],
+  'F': [0x1F,0x10,0x10,0x1E,0x10,0x10,0x10],
+  'G': [0x0E,0x11,0x10,0x17,0x11,0x11,0x0F],
+  'H': [0x11,0x11,0x11,0x1F,0x11,0x11,0x11],
+  'I': [0x0E,0x04,0x04,0x04,0x04,0x04,0x0E],
+  'J': [0x07,0x02,0x02,0x02,0x02,0x12,0x0C],
+  'K': [0x11,0x12,0x14,0x18,0x14,0x12,0x11],
+  'L': [0x10,0x10,0x10,0x10,0x10,0x10,0x1F],
+  'M': [0x11,0x1B,0x15,0x15,0x11,0x11,0x11],
+  'N': [0x11,0x19,0x15,0x13,0x11,0x11,0x11],
+  'O': [0x0E,0x11,0x11,0x11,0x11,0x11,0x0E],
+  'P': [0x1E,0x11,0x11,0x1E,0x10,0x10,0x10],
+  'Q': [0x0E,0x11,0x11,0x11,0x15,0x12,0x0D],
+  'R': [0x1E,0x11,0x11,0x1E,0x14,0x12,0x11],
+  'S': [0x0E,0x11,0x10,0x0E,0x01,0x11,0x0E],
+  'T': [0x1F,0x04,0x04,0x04,0x04,0x04,0x04],
+  'U': [0x11,0x11,0x11,0x11,0x11,0x11,0x0E],
+  'V': [0x11,0x11,0x11,0x11,0x0A,0x0A,0x04],
+  'W': [0x11,0x11,0x11,0x15,0x15,0x15,0x0A],
+  'X': [0x11,0x11,0x0A,0x04,0x0A,0x11,0x11],
+  'Y': [0x11,0x11,0x0A,0x04,0x04,0x04,0x04],
+  'Z': [0x1F,0x01,0x02,0x04,0x08,0x10,0x1F],
+  '0': [0x0E,0x11,0x13,0x15,0x19,0x11,0x0E],
+  '1': [0x04,0x0C,0x04,0x04,0x04,0x04,0x0E],
+  '2': [0x0E,0x11,0x01,0x06,0x08,0x10,0x1F],
+  '3': [0x0E,0x11,0x01,0x06,0x01,0x11,0x0E],
+  '4': [0x02,0x06,0x0A,0x12,0x1F,0x02,0x02],
+  '5': [0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E],
+  '6': [0x06,0x08,0x10,0x1E,0x11,0x11,0x0E],
+  '7': [0x1F,0x01,0x02,0x04,0x08,0x08,0x08],
+  '8': [0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E],
+  '9': [0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C],
+  '-': [0x00,0x00,0x00,0x1F,0x00,0x00,0x00],
+  '.': [0x00,0x00,0x00,0x00,0x00,0x0C,0x0C],
+  ':': [0x00,0x0C,0x0C,0x00,0x0C,0x0C,0x00],
+  '_': [0x00,0x00,0x00,0x00,0x00,0x00,0x1F],
+  '/': [0x01,0x01,0x02,0x04,0x08,0x10,0x10],
+  '#': [0x0A,0x0A,0x1F,0x0A,0x1F,0x0A,0x0A],
+};
+
+/**
+ * Render up to 8 chars of text on a solid-colour button.
+ * Returns a base64-encoded PNG string (any size — gateway resizes to icon size).
+ * @param {string} text     — text to render (truncated to 8 chars, uppercased)
+ * @param {{r,g,b}} bg      — background colour
+ * @param {{r,g,b}} fg      — text colour (default white)
+ * @param {number}  size    — canvas size in pixels (default 96)
+ */
+function renderTextButton(text, bg, fg = { r: 255, g: 255, b: 255 }, size = 96) {
+  text = text.toUpperCase().slice(0, 8);
+  const pixels = Buffer.alloc(size * size * 4);
+  // Fill background
+  for (let i = 0; i < size * size; i++) {
+    pixels[i * 4]     = bg.r;
+    pixels[i * 4 + 1] = bg.g;
+    pixels[i * 4 + 2] = bg.b;
+    pixels[i * 4 + 3] = 255;
+  }
+  // Render text — each font pixel = scale×scale real pixels
+  const scale = 2;
+  const charW = 5 * scale;             // 10px per char
+  const charH = 7 * scale;             // 14px per char
+  const gap   = 2;                     // 2px gap between chars
+  const stride = charW + gap;          // 12px per char slot
+  const totalW = text.length * stride - gap;
+  const offsetX = Math.floor((size - totalW) / 2);
+  const offsetY = Math.floor((size - charH) / 2);
+  for (let ci = 0; ci < text.length; ci++) {
+    const glyph = BITMAP_FONT[text[ci]] || BITMAP_FONT[' '];
+    const cx = offsetX + ci * stride;
+    for (let row = 0; row < 7; row++) {
+      for (let col = 0; col < 5; col++) {
+        if (glyph[row] & (0x10 >> col)) {
+          // Draw scale×scale block
+          for (let sy = 0; sy < scale; sy++) {
+            for (let sx = 0; sx < scale; sx++) {
+              const px = cx + col * scale + sx;
+              const py = offsetY + row * scale + sy;
+              if (px >= 0 && px < size && py >= 0 && py < size) {
+                const idx = (py * size + px) * 4;
+                pixels[idx] = fg.r; pixels[idx+1] = fg.g; pixels[idx+2] = fg.b; pixels[idx+3] = 255;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return createPNG(size, size, pixels).toString('base64');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream Deck WebSocket brain — bidirectional WS on /streamdeck
+// ─────────────────────────────────────────────────────────────────────────────
+
+const sdClients     = new Map();  // serial → { socket, model, rows, cols, iconSize }
+const sdDeviceState = new Map();  // mac → { online: bool, power: 'on'|'off'|'unknown' }
+const sdKeyTimers   = new Map();  // `${serial}:${index}` → { timer, mac, downAt, fired }
+
+// XL layout constants — TV buttons in the right 4 columns
+const SD_XL_COLS = 8;
+const SD_ZONE_COLS = 4;  // left 4 columns reserved for preview zone
+const SD_ZONE_INDICES = [0,1,2,3, 8,9,10,11, 16,17,18,19, 24,25,26,27];
+
+/** Map a device index (0-based order in registry) to an XL key index (right 4 cols). */
+function sdTvButtonIndex(deviceIndex) {
+  const row = Math.floor(deviceIndex / 4);
+  const col = SD_ZONE_COLS + (deviceIndex % 4);
+  return row * SD_XL_COLS + col;
+}
+
+/** Get the ordered list of device MACs (consistent ordering for button assignment). */
+function sdGetDeviceList() {
+  const reg = loadRegistry();
+  return Object.entries(reg.devices || {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([mac, dev]) => ({ mac, ...dev }));
+}
+
+/** Reverse-map: key index → MAC (or null if not a TV button). */
+function sdButtonToMac(index) {
+  const col = index % SD_XL_COLS;
+  if (col < SD_ZONE_COLS) return null; // left zone, not a TV button
+  const row = Math.floor(index / SD_XL_COLS);
+  const deviceIndex = row * 4 + (col - SD_ZONE_COLS);
+  const devices = sdGetDeviceList();
+  return deviceIndex < devices.length ? devices[deviceIndex].mac : null;
+}
+
+/** Get the active group ID for a device (event group or defaultGroup). */
+function sdGetActiveGroupId(mac, reg) {
+  const active = getActiveSubEvent(mac, reg);
+  if (active) return active.subEvent.groupId;
+  const device = reg.devices?.[mac];
+  return device?.defaultGroup || null;
+}
+
+/** Send a JSON message to a specific SD socket. */
+function sdSend(socket, obj) {
+  try { socket.write(wsFrame(Buffer.from(JSON.stringify(obj)))); } catch {}
+}
+
+/** Broadcast a JSON message to ALL connected SD clients. */
+function sdBroadcast(obj) {
+  const frame = wsFrame(Buffer.from(JSON.stringify(obj)));
+  for (const [, client] of sdClients) {
+    try { client.socket.write(frame); } catch {}
+  }
+}
+
+/** Render and send one TV button to a specific socket. */
+function sdSendButton(socket, mac, device, deviceIndex) {
+  const state = sdDeviceState.get(mac) || { online: false, power: 'unknown' };
+  const label = (device.name || mac).slice(0, 8);
+  let bg, fg;
+  if (!state.online) {
+    bg = { r: 60, g: 60, b: 60 };   // dark grey — offline / disabled
+    fg = { r: 120, g: 120, b: 120 }; // dim text
+  } else if (state.power === 'on') {
+    bg = { r: 0, g: 120, b: 0 };    // green — powered on
+    fg = { r: 255, g: 255, b: 255 };
+  } else {
+    bg = { r: 160, g: 0, b: 0 };    // red — powered off or unknown
+    fg = { r: 255, g: 255, b: 255 };
+  }
+  const image = renderTextButton(label, bg, fg);
+  sdSend(socket, { event: 'set_key', data: { index: sdTvButtonIndex(deviceIndex), image } });
+}
+
+/** Send all TV buttons to a specific SD socket. */
+function sdRefreshAllButtons(socket) {
+  const devices = sdGetDeviceList();
+  devices.forEach((dev, i) => {
+    if (i >= 16) return; // max 16 TV slots on XL
+    sdSendButton(socket, dev.mac, dev, i);
+  });
+}
+
+/** Update one TV button on ALL connected SDs. */
+function sdUpdateButton(mac) {
+  if (sdClients.size === 0) return;
+  const devices = sdGetDeviceList();
+  const idx = devices.findIndex(d => d.mac === mac);
+  if (idx < 0 || idx >= 16) return;
+  const dev = devices[idx];
+  for (const [, client] of sdClients) {
+    sdSendButton(client.socket, mac, dev, idx);
+  }
+}
+
+/** Read the first image asset from a group and return its file buffer, or null. */
+async function sdGetFirstGroupImage(groupId, reg) {
+  const group = reg.groups?.[groupId];
+  if (!group?.assets?.length) return null;
+  for (const hash of group.assets) {
+    try {
+      const meta = JSON.parse(await fs.promises.readFile(cacheSidecarPath(hash), 'utf8'));
+      if (meta.mime && meta.mime.startsWith('image/')) {
+        const ext = path.extname(meta.originalName) || '';
+        const data = await fs.promises.readFile(cacheFilePath(hash, ext));
+        return data;
+      }
+    } catch { /* skip unreadable */ }
+  }
+  return null;
+}
+
+/** Send the first image from a device's active group to the SD preview zone. */
+async function sdShowPreview(socket, mac) {
+  const reg = loadRegistry();
+  const groupId = sdGetActiveGroupId(mac, reg);
+  if (!groupId) return;
+  const imageData = await sdGetFirstGroupImage(groupId, reg);
+  if (!imageData) return;
+  sdSend(socket, {
+    event: 'set_zone_fast',
+    data: {
+      image: imageData.toString('base64'),
+      indices: SD_ZONE_INDICES,
+      cols: 4, rows: 4,
+      position: 'center',
+      background: { r: 0, g: 0, b: 0 }
+    }
+  });
+}
+
+/** Toggle power for a TV by MAC. Opens a temporary NEC session. */
+async function sdTogglePower(mac) {
+  const reg = loadRegistry();
+  const device = reg.devices?.[mac];
+  if (!device?.tvIp) return;
+  let sess;
+  try {
+    sess = await Promise.race([
+      openTcpSession(device.tvIp, { port: 7142 }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('sd-power-timeout')), 6000)),
+    ]);
+    const pw = await Promise.race([
+      sess.powerStatus(1),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('sd-power-timeout')), 3000)),
+    ]);
+    const newState = pw.modeStr === 'on' ? 'off' : 'on';
+    await Promise.race([
+      sess.powerSet(1, newState),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('sd-power-timeout')), 3000)),
+    ]);
+    log('info', `[streamdeck] Power toggled for ${device.name || mac}: ${pw.modeStr} → ${newState}`);
+    sdDeviceState.set(mac, { online: true, power: newState });
+    sdUpdateButton(mac);
+    wsBroadcast({ type: 'device-online', category: 'tv', mac, name: device.name, ip: device.tvIp, power: newState });
+  } catch (e) {
+    log('warn', `[streamdeck] Power toggle failed for ${device.name || mac}: ${e.message}`);
+  } finally {
+    if (sess) await sess.close().catch(() => {});
+  }
+}
+
+/** Handle incoming SD key events. */
+function sdHandleKeyEvent(serial, data) {
+  const { index, state } = data;
+  const mac = sdButtonToMac(index);
+  if (!mac) return;    // not a TV button
+  const timerKey = `${serial}:${index}`;
+  const client = sdClients.get(serial);
+
+  if (state === 'down') {
+    // Show preview immediately
+    if (client) sdShowPreview(client.socket, mac).catch(() => {});
+    // Start 5-second long-press timer
+    const existing = sdKeyTimers.get(timerKey);
+    if (existing) clearTimeout(existing.timer);
+    sdKeyTimers.set(timerKey, {
+      mac,
+      downAt: Date.now(),
+      fired: false,
+      timer: setTimeout(() => {
+        const entry = sdKeyTimers.get(timerKey);
+        if (entry) entry.fired = true;
+        sdTogglePower(mac).catch(() => {});
+      }, 5000)
+    });
+  }
+
+  if (state === 'up') {
+    const entry = sdKeyTimers.get(timerKey);
+    if (entry) {
+      if (!entry.fired) clearTimeout(entry.timer); // short press — cancel timer
+      sdKeyTimers.delete(timerKey);
+    }
+  }
+}
+
+// --- WebSocket frame reader for bidirectional SD communication ---
+
+function sdWsUpgrade(req, socket) {
+  const key    = req.headers['sec-websocket-key'];
+  const accept = crypto
+    .createHash('sha1')
+    .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+    .digest('base64');
+
+  socket.write(
+    'HTTP/1.1 101 Switching Protocols\r\n' +
+    'Upgrade: websocket\r\n' +
+    'Connection: Upgrade\r\n' +
+    `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
+  );
+
+  let serial = null;
+  let buf = Buffer.alloc(0);
+
+  const cleanup = () => {
+    if (serial) {
+      // Clear any active key timers for this device
+      for (const [key, entry] of sdKeyTimers) {
+        if (key.startsWith(serial + ':')) {
+          clearTimeout(entry.timer);
+          sdKeyTimers.delete(key);
+        }
+      }
+      sdClients.delete(serial);
+      log('info', `[streamdeck] Disconnected: ${serial}`);
+    }
+  };
+
+  socket.on('data', (chunk) => {
+    buf = Buffer.concat([buf, chunk]);
+    // Parse all complete frames from the buffer
+    while (buf.length >= 2) {
+      const byte0 = buf[0];
+      const byte1 = buf[1];
+      const opcode = byte0 & 0x0F;
+      const masked = (byte1 & 0x80) !== 0;
+      let payloadLen = byte1 & 0x7F;
+      let headerLen = 2;
+
+      if (payloadLen === 126) {
+        if (buf.length < 4) return;
+        payloadLen = buf.readUInt16BE(2);
+        headerLen = 4;
+      } else if (payloadLen === 127) {
+        if (buf.length < 10) return;
+        payloadLen = Number(buf.readBigUInt64BE(2));
+        headerLen = 10;
+      }
+
+      if (masked) headerLen += 4;
+      const totalLen = headerLen + payloadLen;
+      if (buf.length < totalLen) return; // incomplete frame
+
+      let payload;
+      if (masked) {
+        const maskKey = buf.slice(headerLen - 4, headerLen);
+        payload = Buffer.alloc(payloadLen);
+        for (let i = 0; i < payloadLen; i++) payload[i] = buf[headerLen + i] ^ maskKey[i & 3];
+      } else {
+        payload = buf.slice(headerLen, totalLen);
+      }
+
+      buf = buf.slice(totalLen);
+
+      // Handle frame by opcode
+      if (opcode === 0x08) { // close
+        cleanup();
+        try { socket.end(); } catch {}
+        return;
+      }
+      if (opcode === 0x09) { // ping → pong
+        const pong = Buffer.alloc(2 + payload.length);
+        pong[0] = 0x8A; pong[1] = payload.length;
+        payload.copy(pong, 2);
+        try { socket.write(pong); } catch {}
+        continue;
+      }
+      if (opcode !== 0x01) continue; // only handle text frames
+
+      try {
+        const msg = JSON.parse(payload.toString('utf8'));
+
+        if (msg.event === 'device_online') {
+          serial = msg.data.serial || 'unknown';
+          sdClients.set(serial, {
+            socket,
+            model: msg.data.model,
+            rows: msg.data.rows,
+            cols: msg.data.cols,
+            iconSize: msg.data.iconSize || 96,
+          });
+          log('info', `[streamdeck] Connected: ${msg.data.model} (${serial}) ${msg.data.cols}×${msg.data.rows}`);
+          sdRefreshAllButtons(socket);
+        }
+
+        if (msg.event === 'key_event' && serial) {
+          sdHandleKeyEvent(serial, msg.data);
+        }
+      } catch { /* ignore malformed JSON */ }
+    }
+  });
+
+  socket.on('error', cleanup);
+  socket.on('close', cleanup);
+  socket.on('end', cleanup);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1002,6 +1450,8 @@ async function handleApi(method, pathname, body, req) {
     if (up === false) {
       log('info', `[device-offline] ${mac} (${ip}) disconnected`);
       wsBroadcast({ type: 'device-offline', mac, ip });
+      sdDeviceState.set(mac, { online: false, power: 'unknown' });
+      sdUpdateButton(mac);
       return { ok: true, category: 'offline', mac, ip };
     }
 
@@ -1053,6 +1503,8 @@ async function handleApi(method, pathname, body, req) {
       }
 
       wsBroadcast({ type: 'device-online', category: 'tv', mac, name: device.name, ip, power });
+      sdDeviceState.set(mac, { online: true, power });
+      sdUpdateButton(mac);
 
       // Determine what this device should be playing:
       // 1. Active scheduled event takes priority
@@ -1150,6 +1602,8 @@ async function handleApi(method, pathname, body, req) {
         serial:   tvProbe.serial   ?? null,
         firmware: tvProbe.firmware ?? null,
       });
+      sdDeviceState.set(mac, { online: true, power: tvProbe.power ?? 'unknown' });
+      sdUpdateButton(mac);
       return { ok: true, category: 'tv', discovered: true, mac, name, ip, power: tvProbe.power };
     }
 
@@ -2766,7 +3220,11 @@ const server = http.createServer(async (req, res) => {
 
 server.on('upgrade', (req, socket, head) => {
   if (req.headers.upgrade?.toLowerCase() === 'websocket') {
-    wsUpgrade(req, socket);
+    if (req.url === '/streamdeck') {
+      sdWsUpgrade(req, socket);
+    } else {
+      wsUpgrade(req, socket);
+    }
   }
 });
 

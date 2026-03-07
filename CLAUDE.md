@@ -488,8 +488,9 @@ the NEC monitor control system. Runs on the operator's local machine (e.g. i7 wo
   index.js (Node)          public/remote.js (browser)
   USB → sharp → WS          WebHID → Canvas → WS
          ↘                        ↙
-          Brain WebSocket Server  ←→  server.js NEC API
-                  :4001
+      ws://<router>:4000/streamdeck   (brain in server.js)
+                ↕
+          NEC API (same process)
 ```
 
 Two client types connect to the same brain server over WebSocket:
@@ -502,27 +503,65 @@ Two client types connect to the same brain server over WebSocket:
 Both implement identical protocol behaviour. `index.js` runs as a persistent Node process;
 `remote.js` is served to any browser and uses the WebHID permission prompt to claim the device.
 
-The brain server logic is currently in `test-server.js` (demo/reference only). For production,
-this logic will be integrated into `server.js` as a WebSocket endpoint on port 4001.
+The brain server is **integrated directly into `server.js`** as a WebSocket endpoint at
+`ws://<router-ip>:4000/streamdeck`. The gateway's `SERVER_URL` must point there (not localhost:4001).
+`test-server.js` remains as a standalone demo/reference only.
 
 ### Running the Gateway (dev machine)
 
 ```bash
 cd streamdeck-gateway
-node index.js          # USB gateway — connects to brain at ws://localhost:4001
-node test-server.js    # Reference brain server — port 4001, serves satellite page
+# Edit index.js: set SERVER_URL to ws://<router-ip>:4000/streamdeck
+node index.js          # USB gateway — connects to brain in server.js
 ```
 
-The satellite page is served at `http://localhost:4001` — open in Chrome, click
-"Connect Stream Deck", grant WebHID permission.
+The brain runs inside `server.js` on the router. No separate brain server needed.
+`test-server.js` can still be used for standalone testing on port 4001.
 
 ### Authentication / Whitelist
 
-- `whitelist.json` — array of authorised serial number strings
-- **Local connections** (127.0.0.1 / ::1): serial auto-added on first `device_online`
-- **Remote connections**: serial must already be in `whitelist.json` — rejected with
-  `auth_failed` otherwise
-- Connect a deck locally once to register it, then it can connect remotely
+- `whitelist.json` — array of authorised serial number strings (test-server.js only)
+- The production brain in `server.js` accepts all Stream Deck connections on `/streamdeck`
+  (no serial whitelist — the gateway runs on a trusted LAN)
+
+---
+
+### XL Layout — TV Button Grid
+
+The Stream Deck XL (4×8 = 32 keys) is laid out as:
+
+```
+┌─────────────────────────────┬─────────────────────────────┐
+│   Left 4 columns (0–3)     │   Right 4 columns (4–7)     │
+│                             │                             │
+│   PREVIEW ZONE              │   TV BUTTONS                │
+│   (set_zone_fast)           │   (set_key per device)      │
+│                             │                             │
+│   Indices:                  │   Row 0:  4   5   6   7     │
+│   0  1  2  3               │   Row 1: 12  13  14  15     │
+│   8  9 10 11               │   Row 2: 20  21  22  23     │
+│  16 17 18 19               │   Row 3: 28  29  30  31     │
+│  24 25 26 27               │                             │
+└─────────────────────────────┴─────────────────────────────┘
+```
+
+**TV buttons** (right 4 cols, max 16 TVs):
+- Assigned in registry order (sorted by MAC), one per registered device
+- Label: first 8 chars of `device.name` (uppercase, bitmap font)
+- Colours: **green** = powered on, **red** = powered off, **dark grey** = offline
+
+**Preview zone** (left 4 cols):
+- Updated on TV button press — shows the first image from the device's active asset group
+- Sent via `set_zone_fast` (fit-contain, centred, black letterbox)
+
+**Button interactions:**
+- **Short press** (< 5s): sends the first cached image from the TV's active group to the
+  preview zone (event group takes priority, then `defaultGroup`)
+- **Long press** (≥ 5s): toggles the TV's power state via NEC protocol, updates button colour
+
+**Device offline handling:**
+When `POST /api/device-online` receives `{ up: false }`, the TV's button goes dark grey with
+dimmed text. It remains in position (not removed) so the layout stays stable.
 
 ---
 
@@ -632,23 +671,33 @@ and it will appear correctly when the splash clears.
 
 ---
 
-### Integration with server.js
+### Integration with server.js (implemented)
 
-The brain's `key_event` handler maps deck button presses to NEC API calls:
+The brain is built into `server.js` at the `/streamdeck` WebSocket endpoint. Key components:
 
+**State tracking (in server.js):**
 ```javascript
-// Skeleton — expand as UI is built out
-if (event === 'key_event' && data.state === 'up') {
-    const { index, serial } = data;
-    // Example: key 0 → switch to MP input on the device linked to this deck
-    if (index === 0) {
-        http.request({ host: '192.168.100.1', port: 4000, path: '/api/vcp/set', method: 'POST' }, ...);
-    }
-}
+const sdClients     = new Map();  // serial → { socket, model, rows, cols, iconSize }
+const sdDeviceState = new Map();  // mac → { online, power }
+const sdKeyTimers   = new Map();  // `${serial}:${index}` → { timer, mac, downAt, fired }
 ```
 
-The brain server will receive the device's `serial` on `device_online` and can look up which
-NEC TV is paired to that deck (store a `serial → tvIP` mapping alongside the whitelist).
+**PNG generation (zero deps):**
+`renderTextButton(text, bg, fg, size)` — pure Node.js bitmap font renderer using `zlib.deflateSync`
+for PNG compression. The gateway's `sharp` handles resizing to icon size.
+
+**Key functions:**
+- `sdWsUpgrade(req, socket)` — WebSocket handshake + bidirectional frame reader
+- `sdRefreshAllButtons(socket)` — send all TV buttons on connect
+- `sdUpdateButton(mac)` — re-render one button on all connected SDs
+- `sdShowPreview(socket, mac)` — send first group image to preview zone
+- `sdTogglePower(mac)` — open temp NEC session, toggle power, update button
+- `sdHandleKeyEvent(serial, data)` — routes press/release + long-press timer
+
+**Hooks into existing code:**
+- `POST /api/device-online` with `up: false` → `sdDeviceState` + `sdUpdateButton`
+- `device-online` broadcast (known TV) → `sdDeviceState` + `sdUpdateButton`
+- `device-discovered` broadcast (new TV) → `sdDeviceState` + `sdUpdateButton`
 
 ### File Structure
 
