@@ -1296,6 +1296,8 @@ async function handleApi(method, pathname, body, req) {
     const { tvIP } = body;
     if (!tvIP) return { error: 'tvIP required' };
     const playerIP = await getPlayerIP(tvIP);
+    // Enter file manager mode (required before filelist.json is accessible)
+    await enterFileManager(playerIP);
     // Navigate to root
     await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
     const raw   = await playerRequest(playerIP, `/mmb/filelist.json?_=${Date.now()}`, 'GET',
@@ -2471,24 +2473,43 @@ function waitForPlayer(playerIP, timeoutMs = 15000) {
 }
 
 /**
+ * Send FM= (enter file manager mode) to the player.
+ * Required before /mmb/filelist.json becomes accessible on real NEC firmware.
+ * Idempotent — safe to call multiple times.
+ */
+function enterFileManager(playerIP) {
+  return playerRequest(playerIP, '/cgi-bin/cgictrl?FM=', 'POST')
+    .then(() => log('info', `[enterFileManager] FM= sent to ${playerIP}`))
+    .catch(e => log('info', `[enterFileManager] FM= failed on ${playerIP}: ${e.message} (will retry)`));
+}
+
+/**
  * Poll playerIP:/mmb/filelist.json until the response parses as valid JSON.
  * More reliable than a TCP-only check: the HTTP daemon can accept connections
  * before the CGI module is ready, briefly serving HTML error pages.
+ *
+ * Sends FM= (enter file manager mode) before each poll — real NEC firmware
+ * returns 404 for filelist.json until FM= has been sent at least once.
  */
 function waitForPlayerReady(playerIP, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
     function attempt() {
-      const url = `/mmb/filelist.json?_=${Date.now()}`;
-      playerRequest(playerIP, url, 'GET',
-        null, { referer: `http://${playerIP}/sd_card_viewer.html` })
-        .then(body => {
-          log('info', `[waitForPlayerReady] http://${playerIP}${url} → ${body.slice(0, 120)}`);
-          const fixed = body.replace(/,(\s*\])/g, '$1');
-          try { JSON.parse(fixed); log('info', `[waitForPlayerReady] CGI ready on ${playerIP}`); resolve(); }
-          catch { log('info', `[waitForPlayerReady] not ready yet (HTML/garbage) — retrying`); retry(); }
-        })
-        .catch(e => { log('info', `[waitForPlayerReady] TCP error on ${playerIP}: ${e.message} — retrying`); retry(); });
+      // FM= must precede filelist.json — firmware returns 404 without it.
+      // Fire-and-forget: if CGI isn't ready yet this will fail, and we'll
+      // retry both FM= and filelist on the next poll cycle.
+      enterFileManager(playerIP).then(() => {
+        const url = `/mmb/filelist.json?_=${Date.now()}`;
+        playerRequest(playerIP, url, 'GET',
+          null, { referer: `http://${playerIP}/sd_card_viewer.html` })
+          .then(body => {
+            log('info', `[waitForPlayerReady] http://${playerIP}${url} → ${body.slice(0, 120)}`);
+            const fixed = body.replace(/,(\s*\])/g, '$1');
+            try { JSON.parse(fixed); log('info', `[waitForPlayerReady] CGI ready on ${playerIP}`); resolve(); }
+            catch { log('info', `[waitForPlayerReady] not ready yet (HTML/garbage) — retrying`); retry(); }
+          })
+          .catch(e => { log('info', `[waitForPlayerReady] TCP error on ${playerIP}: ${e.message} — retrying`); retry(); });
+      });
     }
     function retry() {
       if (Date.now() >= deadline)
@@ -2501,6 +2522,8 @@ function waitForPlayerReady(playerIP, timeoutMs = 30000) {
 
 /** List and delete every top-level entry on the player SD card. */
 async function wipeDrive(playerIP) {
+  // Enter file manager mode (required before filelist.json is accessible)
+  await enterFileManager(playerIP);
   // Navigate to root before listing (FL=-01 = go up/to root)
   await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
 
@@ -2582,6 +2605,8 @@ async function createFolder(playerIP, folderName) {
  *   FL=-01        → return to root
  */
 async function checkPlayerFolder(playerIP, folderName) {
+  // Enter file manager mode (required before filelist.json is accessible)
+  await enterFileManager(playerIP);
   // Navigate to root
   await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
 
@@ -2998,6 +3023,8 @@ async function restartPlayer(playerIP) {
  * Navigates into the folder by index from root listing.
  */
 async function getPlayerFolderContents(playerIP, folder) {
+  // Enter file manager mode (required before filelist.json is accessible)
+  await enterFileManager(playerIP);
   // Go to root
   await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
 

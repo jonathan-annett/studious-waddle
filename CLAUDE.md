@@ -134,9 +134,13 @@ V=S,22,<len>,0,<secs>,%00,  Set slideshow interval (5–99999 seconds)
 ```
 GET /mmb/filelist.json
 ```
-Returns `{ dir_path, file_cnt, fileinfo: [{name, size, date, type}] }`  
-`type`: 0 = folder, 1 = file  
+Returns `{ dir_path, file_cnt, fileinfo: [{name, size, date, type}] }`
+`type`: 0 = folder, 1 = file
 **Firmware bug:** trailing comma before `]` — fix with `.replace(/,(\s*\])/g, '$1')` before JSON.parse.
+**CRITICAL — FM= prerequisite:** The player returns 404 for `/mmb/filelist.json` until
+`POST /cgi-bin/cgictrl?FM=` (enter file manager mode) has been sent at least once after boot
+or player restart (RSG=/RSB=). Always call `enterFileManager(playerIP)` before any filelist
+access. This is idempotent — safe to call multiple times.
 
 **Index navigation:**
 Items are 0-based in the filelist array. Use `findIndex()` to locate a folder by name, then
@@ -401,6 +405,11 @@ This will need to be made dynamic in a future iteration.
 
 6. **RSG= vs RSB=** — `RSG=<clock>` finalises uploads AND restarts playback. `RSB=<clock>` just
    restarts. Use RSG= for the play flow.
+
+7. **FM= required before filelist.json** — the player returns 404 for `/mmb/filelist.json` until
+   `POST /cgi-bin/cgictrl?FM=` has been sent at least once. This state resets on player restart
+   (RSG=/RSB=). `enterFileManager(playerIP)` in server.js handles this. All functions that access
+   filelist.json call it first. It is idempotent — safe to call multiple times.
 
 ---
 

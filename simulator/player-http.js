@@ -222,6 +222,9 @@ export function createPlayerHttpServer(device, { port = 80, onLog } = {}) {
       // Fault injection: if Date.now() < restartingUntil, serve HTML instead of JSON
       restartingUntil: 0,
       serveHtmlFor:    0, // configurable ms to return HTML after RSG= (fault injection)
+      // Simulates real firmware quirk: filelist.json returns 404 until FM= is sent.
+      // Starts false (player just booted), set to true on FM= command.
+      fileManagerActive: false,
     };
     device.player.cwd = device.player.fs;
   }
@@ -238,6 +241,15 @@ export function createPlayerHttpServer(device, { port = 80, onLog } = {}) {
 
     // ── GET /mmb/filelist.json ───────────────────────────────────────────────
     if (req.method === 'GET' && urlPath === '/mmb/filelist.json') {
+      // Simulate real firmware quirk: filelist.json returns 404 until FM= is sent
+      if (!device.player.fileManagerActive) {
+        log(`GET /mmb/filelist.json → 404 (file manager not active — send FM= first)`);
+        const html = `<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD><BODY>Not Found</BODY></HTML>`;
+        res.writeHead(404, { 'Content-Type': 'text/html' });
+        res.end(html);
+        return;
+      }
+
       // Fault injection: briefly return HTML after RSG= to test waitForPlayerReady
       if (Date.now() < device.player.restartingUntil) {
         const html = `<HTML><HEAD><TITLE>Please wait...</TITLE></HEAD><BODY>Restarting...</BODY></HTML>`;
@@ -275,7 +287,8 @@ export function createPlayerHttpServer(device, { port = 80, onLog } = {}) {
 
       // ── FM= (file manager mode) ──
       if (cmd === 'FM') {
-        log(`FM= (file manager mode entered)`);
+        device.player.fileManagerActive = true;
+        log(`FM= (file manager mode entered — filelist.json now accessible)`);
         res.writeHead(200);
         res.end('OK');
         return;
@@ -327,6 +340,8 @@ export function createPlayerHttpServer(device, { port = 80, onLog } = {}) {
       // ── RSG= finalise/commit upload + restart player ──
       if (cmd === 'RSG') {
         log(`RSG=${val} — player restart`);
+        // Player restart clears file manager mode — FM= must be re-sent
+        device.player.fileManagerActive = false;
         if (device.player.serveHtmlFor > 0) {
           device.player.restartingUntil = Date.now() + device.player.serveHtmlFor;
           log(`fault injection: will serve HTML for ${device.player.serveHtmlFor}ms`);
@@ -339,6 +354,8 @@ export function createPlayerHttpServer(device, { port = 80, onLog } = {}) {
       // ── RSB= restart player only ──
       if (cmd === 'RSB') {
         log(`RSB=${val} — player restart (RSB)`);
+        // Player restart clears file manager mode — FM= must be re-sent
+        device.player.fileManagerActive = false;
         if (device.player.serveHtmlFor > 0) {
           device.player.restartingUntil = Date.now() + device.player.serveHtmlFor;
         }
