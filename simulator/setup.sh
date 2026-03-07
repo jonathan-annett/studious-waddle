@@ -5,20 +5,22 @@
 # addresses reachable from the router. The script auto-detects which
 # network interface carries the same subnet as the device IPs in devices.json.
 #
-# Usage:  sudo bash simulator/setup.sh           ← add aliases
-#         sudo bash simulator/setup.sh remove     ← remove aliases
-#
-# If node is installed via nvm (not visible to sudo), preserve PATH:
-#         sudo -E bash simulator/setup.sh
+# Usage:  sudo simulator/setup.sh $(which node)            ← add aliases
+#         sudo simulator/setup.sh $(which node) remove      ← remove aliases
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEVICES_JSON="${SCRIPT_DIR}/devices.json"
 
-# ── Resolve node binary (nvm installs per-user, invisible to sudo) ────────────
-NODE=$(which node 2>/dev/null || echo "")
-if [ -z "$NODE" ]; then
-  echo "ERROR: node not found in PATH."
-  echo "If using nvm, run:  NODE=\$(which node) sudo -E bash $0 $*"
+# ── Resolve node binary from first argument ───────────────────────────────────
+NODE="$1"
+ACTION="${2:-add}"
+
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+  echo "Usage: sudo $0 \$(which node) [add|remove]"
+  echo ""
+  echo "  The first argument must be the full path to the node binary."
+  echo "  Resolve it BEFORE sudo so nvm paths are visible:"
+  echo "    sudo $0 \$(which node)"
   exit 1
 fi
 
@@ -38,7 +40,6 @@ if [ -z "$DEVICE_IPS" ]; then
   exit 0
 fi
 
-ACTION="${1:-add}"
 OS="$(uname -s)"
 
 # ── Auto-detect the correct network interface ────────────────────────────────
@@ -69,6 +70,7 @@ fi
 echo "=== NEC Simulator IP alias setup ($OS) ==="
 echo "Action:    $ACTION"
 echo "Interface: $IFACE  (detected from ${SUBNET_PREFIX}.x subnet)"
+echo "Node:      $NODE"
 echo "IPs from devices.json:"
 echo "$DEVICE_IPS" | sed 's/^/  /'
 echo ""
@@ -90,19 +92,19 @@ for IP in $DEVICE_IPS; do
   if [ "$OS" = "Darwin" ]; then
     if [ "$ACTION" = "remove" ]; then
       echo "  Removing $IFACE alias $IP"
-      sudo ifconfig "$IFACE" -alias "$IP" 2>/dev/null || true
+      ifconfig "$IFACE" -alias "$IP" 2>/dev/null || true
     else
       echo "  Adding $IFACE alias $IP"
-      sudo ifconfig "$IFACE" alias "$IP" netmask 255.255.255.0 up
+      ifconfig "$IFACE" alias "$IP" netmask 255.255.255.0 up
     fi
 
   elif [ "$OS" = "Linux" ]; then
     if [ "$ACTION" = "remove" ]; then
       echo "  Removing $IFACE alias $IP/24"
-      sudo ip addr del "${IP}/24" dev "$IFACE" 2>/dev/null || true
+      ip addr del "${IP}/24" dev "$IFACE" 2>/dev/null || true
     else
       echo "  Adding $IFACE alias $IP/24"
-      sudo ip addr add "${IP}/24" dev "$IFACE" 2>/dev/null || echo "    (already exists, skipping)"
+      ip addr add "${IP}/24" dev "$IFACE" 2>/dev/null || echo "    (already exists, skipping)"
     fi
 
   else
@@ -117,6 +119,5 @@ if [ "$ACTION" = "remove" ]; then
   echo "Aliases removed from $IFACE."
 else
   echo "Aliases added to $IFACE. You can now start the simulator:"
-  echo "  sudo $NODE simulator/server.js   (port 80 requires root)"
-  echo "  — or set tvHttpPort/playerHttpPort to 7580/7581 in devices.json for non-root"
+  echo "  sudo $NODE simulator/server.js"
 fi
