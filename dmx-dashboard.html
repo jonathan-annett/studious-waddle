@@ -744,19 +744,33 @@ function updateFolderActiveStates(channels) {
   const prevActive = lastActiveFolders || [];
   lastActiveFolders = activeChs;
 
-  console.log('[DMX] Folder faders: prev=%O, now=%O', prevActive, activeChs);
+  console.log('[DMX] Folder faders: prev=%O, now=%O (count: %d)', prevActive, activeChs, activeChs.length);
 
+  // Handle playback based on active folder count
+  if (activeChs.length === 0) {
+    console.log('[DMX] No folders active → stop playback');
+    // Would call stopPlayback() here if implemented
+    currentPlaying = null;
+  } else if (activeChs.length === 1) {
+    // Single folder active: play it if it just became active
+    const activeChannel = activeChs[0];
+    const f = folders.find(x => x.channel === activeChannel);
+    if (f && !prevActive.includes(activeChannel)) {
+      console.log('[DMX] Single folder CH%d "%s" just activated → calling doPlayFolder()', f.channel, f.name);
+      doPlayFolder(f.name, f.folderPath).catch(e => console.warn('[DMX] Auto-play failed:', e.message));
+    }
+  } else {
+    // 2+ folders active: HOLD (don't switch)
+    console.log('[DMX] %d folders active (crossfade hold) — not switching', activeChs.length);
+  }
+
+  // Update UI styling
   for (const f of folders) {
     const btn = document.getElementById(`fbtn-${f.channel}`);
     if (!btn) continue;
     btn.classList.remove('active', 'crossfade');
     if (activeChs.includes(f.channel)) {
       btn.classList.add(activeChs.length > 1 ? 'crossfade' : 'active');
-      // If folder just became active, play it
-      if (!prevActive.includes(f.channel)) {
-        console.log('[DMX] Folder CH%d "%s" activated → calling doPlayFolder()', f.channel, f.name);
-        doPlayFolder(f.name, f.folderPath).catch(e => console.warn('[DMX] Auto-play failed:', e.message));
-      }
     }
   }
 
@@ -770,6 +784,13 @@ function updateFolderActiveStates(channels) {
   } else if (activeChs.length === 0) {
     currentPlaying = null;
     document.getElementById('sh-playing').textContent = '— (stopped)';
+  } else {
+    // 2+ active: show folder list
+    const names = activeChs.map(ch => {
+      const f = folders.find(x => x.channel === ch);
+      return f ? f.name : `CH${ch}`;
+    }).join(' + ');
+    document.getElementById('sh-playing').textContent = `${names} (holding)`;
   }
 }
 
