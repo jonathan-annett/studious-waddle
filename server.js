@@ -61,6 +61,11 @@ const PIN_FILE    = path.join(PROJECT_DIR, '.pin'); // written by /api/rollback,
 // Ensure cache directory exists
 fs.mkdirSync(CACHE_DIR, { recursive: true });
 
+// Log cache and registry paths at startup
+console.log(`\n[startup] CACHE_DIR: ${CACHE_DIR}`);
+console.log(`[startup] REGISTRY_FILE: ${REGISTRY_FILE}`);
+console.log(`[startup] Registry file exists: ${fs.existsSync(REGISTRY_FILE) ? 'yes' : 'no'}\n`);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Registry — groups & device assignments
 // Stored as CACHE_DIR/registry.json:
@@ -73,12 +78,26 @@ fs.mkdirSync(CACHE_DIR, { recursive: true });
 const REGISTRY_FILE = path.join(CACHE_DIR, 'registry.json');
 
 function loadRegistry() {
-  try { return JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8')); }
-  catch { return { groups: {}, devices: {}, players: {}, events: {} }; }
+  try {
+    const data = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8'));
+    const deviceCount = Object.keys(data.devices || {}).length;
+    const groupCount = Object.keys(data.groups || {}).length;
+    console.log(`[registry] Loaded from ${REGISTRY_FILE} — ${deviceCount} device(s), ${groupCount} group(s)`);
+    return data;
+  } catch (e) {
+    console.log(`[registry] Could not load ${REGISTRY_FILE} — initializing empty: ${e.message}`);
+    return { groups: {}, devices: {}, players: {}, events: {} };
+  }
 }
 
 function saveRegistry(reg) {
-  fs.writeFileSync(REGISTRY_FILE, JSON.stringify(reg, null, 2));
+  try {
+    fs.writeFileSync(REGISTRY_FILE, JSON.stringify(reg, null, 2));
+    const deviceCount = Object.keys(reg.devices || {}).length;
+    console.log(`[registry] Saved to ${REGISTRY_FILE} — ${deviceCount} device(s)`);
+  } catch (e) {
+    console.error(`[registry] ERROR saving to ${REGISTRY_FILE}: ${e.message}`);
+  }
 }
 
 /** Find a registered device by its tvIp. Returns { mac, device } or null. */
