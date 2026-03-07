@@ -416,6 +416,7 @@ let packetTimeoutHandle = null;
 let currentChannels = new Array(512).fill(0);
 let currentInput    = null; // last known input VCP code
 let currentPlaying  = null; // last known folder name
+let lastActiveFolders = []; // previous active folder channels for transition detection
 const INPUT_NAMES   = { 0x11:'HDMI1', 0x12:'HDMI2', 0x0F:'DP1', 0x10:'DP2', 0x87:'Media Player' };
 
 // Console connection tracking
@@ -736,14 +737,24 @@ function updateFolderActiveStates(channels) {
     const idx = f.channel - 1; // 0-based
     if (idx >= 0 && idx < 512 && (channels[idx] ?? 0) >= 128) activeChs.push(f.channel);
   }
+
+  // Track previous active state to detect transitions
+  const prevActive = lastActiveFolders || [];
+  lastActiveFolders = activeChs;
+
   for (const f of folders) {
     const btn = document.getElementById(`fbtn-${f.channel}`);
     if (!btn) continue;
     btn.classList.remove('active', 'crossfade');
     if (activeChs.includes(f.channel)) {
       btn.classList.add(activeChs.length > 1 ? 'crossfade' : 'active');
+      // If folder just became active, play it
+      if (!prevActive.includes(f.channel)) {
+        doPlayFolder(f.name, f.folderPath).catch(e => console.warn('Auto-play failed:', e.message));
+      }
     }
   }
+
   // Update subheader
   if (activeChs.length === 1) {
     const f = folders.find(x => x.channel === activeChs[0]);
@@ -758,7 +769,7 @@ function updateFolderActiveStates(channels) {
 }
 
 async function doPlayFolder(name, folderPath) {
-  if (consoleMode) return;
+  if (!deviceTvIp) return; // Can't play without TV IP
   try {
     await apiFetch('/api/player/play', 'POST', {
       sessionId, tvIP: deviceTvIp, folder: name,
@@ -974,16 +985,23 @@ function onSlider(name, value) {
 async function doVcp(page, code, value) {
   if (!sessionId) return;
   try {
-    // Find which VCP control this is and scale properly
+    // Find which VCP control this is
     let scaledValue = parseInt(value);
+    let controlName = null;
     for (const [name, ctrl] of Object.entries(VCP_CONTROLS)) {
       if (ctrl.opCode === code) {
+        controlName = name;
+        // Don't send locked controls
+        if (vcpLockedState[name]) return;
+
         const pct = parseInt(value);
         const max = vcpMaxValues[name] || 255;
         scaledValue = Math.round((pct / 100) * max);
         break;
       }
     }
+    // Only send if we found and validated the control
+    if (!controlName) return;
     await apiFetch('/api/vcp/set', 'POST', { sessionId, opPage: page, opCode: code, value: scaledValue });
   }
   catch {}
