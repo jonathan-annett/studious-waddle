@@ -649,6 +649,7 @@ function updateStatusDisplay(controlName) {
 
 // ── Folder management ──────────────────────────────────────────────────────
 async function loadFolders() {
+  console.log('[loadFolders] Starting folder load from deviceTvIp=%s', deviceTvIp);
   try {
     // Load all folders from the media player (like the main UI does)
     const r = await fetch('/api/player/folders', {
@@ -664,8 +665,9 @@ async function loadFolders() {
       name: name,
       folderPath: name,  // Player API returns just folder names
     }));
+    console.log('[loadFolders] Loaded %d folders: %O', folders.length, folders);
   } catch(e) {
-    console.warn('Failed to load folders:', e);
+    console.warn('[loadFolders] Failed:', e);
     folders = [];
   }
   renderFolderGrid();
@@ -742,6 +744,8 @@ function updateFolderActiveStates(channels) {
   const prevActive = lastActiveFolders || [];
   lastActiveFolders = activeChs;
 
+  console.log('[DMX] Folder faders: prev=%O, now=%O', prevActive, activeChs);
+
   for (const f of folders) {
     const btn = document.getElementById(`fbtn-${f.channel}`);
     if (!btn) continue;
@@ -750,7 +754,8 @@ function updateFolderActiveStates(channels) {
       btn.classList.add(activeChs.length > 1 ? 'crossfade' : 'active');
       // If folder just became active, play it
       if (!prevActive.includes(f.channel)) {
-        doPlayFolder(f.name, f.folderPath).catch(e => console.warn('Auto-play failed:', e.message));
+        console.log('[DMX] Folder CH%d "%s" activated → calling doPlayFolder()', f.channel, f.name);
+        doPlayFolder(f.name, f.folderPath).catch(e => console.warn('[DMX] Auto-play failed:', e.message));
       }
     }
   }
@@ -769,11 +774,17 @@ function updateFolderActiveStates(channels) {
 }
 
 async function doPlayFolder(name, folderPath) {
-  if (!deviceTvIp) return; // Can't play without TV IP
+  console.log('[doPlayFolder] name=%s, folderPath=%s, deviceTvIp=%s, sessionId=%s', name, folderPath, deviceTvIp, sessionId);
+  if (!deviceTvIp) {
+    console.warn('[doPlayFolder] No deviceTvIp');
+    return;
+  }
   try {
-    await apiFetch('/api/player/play', 'POST', {
+    console.log('[doPlayFolder] Calling /api/player/play with folder=%s', name);
+    const result = await apiFetch('/api/player/play', 'POST', {
       sessionId, tvIP: deviceTvIp, folder: name,
     });
+    console.log('[doPlayFolder] API response:', result);
     currentPlaying = name;
     document.getElementById('sh-playing').textContent = name;
     // Highlight button
@@ -785,7 +796,10 @@ async function doPlayFolder(name, folderPath) {
       const btn = document.getElementById(`ftmp-${t.name}`);
       if (btn) btn.classList.toggle('active', t.name === name);
     }
-  } catch(e) { alert('Play failed: ' + e.message); }
+  } catch(e) {
+    console.error('[doPlayFolder] Failed:', e);
+    alert('Play failed: ' + e.message);
+  }
 }
 
 // ── VCP State (brightness, contrast, etc.) ─────────────────────────────────
