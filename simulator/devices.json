@@ -1,0 +1,40 @@
+{
+  "_comment": "NEC Display Simulator configuration. See simulator/README below.",
+  "_portNote": "tvHttpPort/playerHttpPort default to 80 (requires sudo or port forwarding). For local dev without root, use 7580/7581 and set up port forwarding (see README).",
+
+  "config": {
+    "simPort":        4001,
+    "necPort":        7142,
+    "tvHttpPort":     80,
+    "playerHttpPort": 80
+  },
+
+  "devices": [
+    {
+      "id":          "sim-001",
+      "name":        "Sim Display 1",
+      "tvIP":        "127.0.0.101",
+      "playerIP":    "127.0.0.102",
+      "mac":         "AA:BB:CC:00:00:01",
+      "model":       "P435-PC2",
+      "serial":      "SIM00001",
+      "firmware":    "00R3.400",
+      "power":       "on",
+      "input":       17,
+      "replyDelayMs": 5
+    },
+    {
+      "id":          "sim-002",
+      "name":        "Sim Display 2",
+      "tvIP":        "127.0.0.103",
+      "playerIP":    "127.0.0.104",
+      "mac":         "AA:BB:CC:00:00:02",
+      "model":       "P435-PC2",
+      "serial":      "SIM00002",
+      "firmware":    "00R3.400",
+      "power":       "on",
+      "input":       17,
+      "replyDelayMs": 5
+    }
+  ]
+}
