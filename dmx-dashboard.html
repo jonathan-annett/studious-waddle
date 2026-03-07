@@ -254,6 +254,9 @@ body.console-mode #console-body { display: block; }
   <button id="take-control-btn" class="ctrl-override" onclick="takeManualControl()">
     Take Manual Control
   </button>
+  <button id="resume-console-btn" class="ctrl-override" onclick="resumeConsoleMode()" style="display:none;background:var(--accent2);color:#000">
+    ● Resume Console
+  </button>
   <span id="header-spacer"></span>
   <a href="/" style="font-size:10px;color:var(--muted);text-decoration:none;
      font-family:var(--mono)">← Main UI</a>
@@ -403,6 +406,10 @@ let currentInput    = null; // last known input VCP code
 let currentPlaying  = null; // last known folder name
 const INPUT_NAMES   = { 0x11:'HDMI1', 0x12:'HDMI2', 0x0F:'DP1', 0x10:'DP2', 0x87:'Media Player' };
 
+// Console loss tracking
+let consoleLost = false;  // true = sACN packets were lost, now in manual mode
+const CONSOLE_LOST_TIMEOUT = 15000; // 15 seconds — sACNView has gaps in transmission
+
 // VCP state tracking
 let vcpMaxValues = {};    // { brightness: 255, contrast: 255, ... }
 let vcpInitialValues = {}; // { brightness: 128, contrast: 100, ... } — captured on load
@@ -522,18 +529,25 @@ function onSacnUpdate(channels) {
   lastPacketMs    = Date.now();
   document.getElementById('sh-last-packet').textContent = 'live';
 
-  // Reset packet timeout
+  // If we were in "lost" state and packets resumed, show "Resume Console" button
+  if (consoleLost && !consoleMode) {
+    document.getElementById('resume-console-btn').style.display = 'inline-block';
+  }
+
+  // Reset packet timeout (15 seconds — sACNView has gaps)
   clearTimeout(packetTimeoutHandle);
   packetTimeoutHandle = setTimeout(() => {
     if (consoleMode) {
+      consoleLost = true;
       document.body.className = 'console-lost';
       document.getElementById('status-badge').className = 'lost';
       document.getElementById('status-badge').textContent = '⚠ CONSOLE LOST — MANUAL';
       document.getElementById('take-control-btn').style.display = 'none';
+      document.getElementById('resume-console-btn').style.display = 'none';
       // After amber flash, switch fully to manual
       setTimeout(() => { setConsoleMode(false); }, 1500);
     }
-  }, 3000);
+  }, CONSOLE_LOST_TIMEOUT);
 
   // Update console monitor bars
   renderConsoleBars(channels);
@@ -566,7 +580,16 @@ function onSacnUpdate(channels) {
 }
 
 function takeManualControl() {
+  consoleLost = false;
+  document.getElementById('resume-console-btn').style.display = 'none';
   setConsoleMode(false);
+}
+
+function resumeConsoleMode() {
+  consoleLost = false;
+  document.getElementById('resume-console-btn').style.display = 'none';
+  document.body.className = '';
+  setConsoleMode(true);
 }
 
 function toggleLock(controlName) {
