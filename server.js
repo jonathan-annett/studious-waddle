@@ -18,6 +18,8 @@ import os      from 'node:os';
 import path    from 'node:path';
 import { URL } from 'node:url';
 import zlib   from 'node:zlib';
+import dgram  from 'node:dgram';
+import { spawn } from 'node:child_process';
 
 import {
   openTcpSession,
@@ -286,6 +288,8 @@ async function checkSchedule() {
   for (const mac of deviceMacs) {
     const device = reg.devices?.[mac];
     if (!device) continue;
+    // sACN show mode — console has full control, scheduler steps aside entirely
+    if (sacnState.get(mac)?.showMode) continue;
     const desired = getDesiredAutoplay(mac, reg);
 
     if (device.autoplay !== desired) {
@@ -372,6 +376,14 @@ const sessions = new Map();
 // schedule-alert is broadcast. Resets whenever desired state changes or the
 // device comes back online and is handled by device-online.
 const playRetryState = new Map();
+
+// sACN per-device state and persistent NEC sessions
+// sacnState:    mac → { dmx: Uint8Array(512), lastPacket: ms, showMode: bool, timers: {}, lastSent: {} }
+// sacnSessions: mac → { session: Session, monitorId: number }
+// sacnSocket:   singleton UDP socket + joined multicast set
+const sacnState    = new Map();
+const sacnSessions = new Map();
+const sacnSocket   = { sock: null, joined: new Set() };
 
 function newId() { return crypto.randomBytes(6).toString('hex'); }
 
@@ -2144,6 +2156,231 @@ async function handleApi(method, pathname, body, req) {
   }
 
   // POST /api/emergency-upload?tvIP=x.x.x.x&filename=foo.mp4
+
+  // ── sACN configuration routes ─────────────────────────────────────────────
+
+  // GET /api/sacn — list all devices with a universe assigned
+  if (method === 'GET' && pathname === '/api/sacn') {
+    const reg = loadRegistry();
+    const list = Object.entries(reg.devices ?? {})
+      .filter(([, d]) => d.sacnUniverse != null)
+      .map(([mac, d]) => ({ mac, name: d.name, tvIp: d.tvIp, universe: d.sacnUniverse }));
+    return { universes: list };
+  }
+
+  // POST /api/sacn/:mac/universe  { universe }
+  if (method === 'POST' && /^\/api\/sacn\/[^/]+\/universe$/.test(pathname)) {
+    const mac = normalizeMac(pathname.split('/')[3]);
+    const { universe } = body;
+    if (!Number.isInteger(universe) || universe < 1 || universe > 63999)
+      return { error: 'universe must be an integer 1–63999' };
+    const reg = loadRegistry();
+    if (!reg.devices?.[mac]) return { error: 'device not found' };
+    reg.devices[mac].sacnUniverse = universe;
+    saveRegistry(reg);
+    joinUniverse(universe);
+    return { ok: true, mac, universe };
+  }
+
+  // DELETE /api/sacn/:mac/universe
+  if (method === 'DELETE' && /^\/api\/sacn\/[^/]+\/universe$/.test(pathname)) {
+    const mac = normalizeMac(pathname.split('/')[3]);
+    const reg = loadRegistry();
+    if (!reg.devices?.[mac]) return { error: 'device not found' };
+    const old = reg.devices[mac].sacnUniverse;
+    if (old != null) leaveUniverse(old);
+    delete reg.devices[mac].sacnUniverse;
+    saveRegistry(reg);
+    return { ok: true };
+  }
+
+  // GET /api/sacn/:mac/state
+  if (method === 'GET' && /^\/api\/sacn\/[^/]+\/state$/.test(pathname)) {
+    const mac = normalizeMac(pathname.split('/')[3]);
+    const reg = loadRegistry();
+    const st  = sacnState.get(mac);
+    return {
+      mac,
+      showMode:   st?.showMode ?? false,
+      lastPacket: st?.lastPacket ?? null,
+      channels:   st ? Array.from(st.dmx) : Array(512).fill(0),
+      folders:    reg.devices?.[mac]?.sacnFolders ?? [],
+    };
+  }
+
+  // GET /api/sacn/:mac/folders
+  if (method === 'GET' && /^\/api\/sacn\/[^/]+\/folders$/.test(pathname)) {
+    const mac = normalizeMac(pathname.split('/')[3]);
+    const reg = loadRegistry();
+    return { folders: reg.devices?.[mac]?.sacnFolders ?? [] };
+  }
+
+  // POST /api/sacn/:mac/folders  { folders: [{channel, name, folderPath, groupId?}] }
+  if (method === 'POST' && /^\/api\/sacn\/[^/]+\/folders$/.test(pathname)) {
+    const mac = normalizeMac(pathname.split('/')[3]);
+    const { folders } = body;
+    if (!Array.isArray(folders)) return { error: 'folders must be an array' };
+    for (const f of folders) {
+      if (!Number.isInteger(f.channel) || f.channel < 101 || f.channel > 510)
+        return { error: `invalid channel ${f.channel} — must be 101–510` };
+      if (!f.name || !f.folderPath) return { error: 'each folder needs name and folderPath' };
+    }
+    const reg = loadRegistry();
+    if (!reg.devices?.[mac]) return { error: 'device not found' };
+    reg.devices[mac].sacnFolders = folders;
+    saveRegistry(reg);
+    return { ok: true, count: folders.length };
+  }
+
+  // ── Temporary folder (bespoke content) routes ─────────────────────────────
+
+  // GET /api/dmx/temp-folders — system-wide summary
+  if (method === 'GET' && pathname === '/api/dmx/temp-folders') {
+    const reg = loadRegistry();
+    const results = [];
+    await Promise.all(Object.entries(reg.devices ?? {}).map(async ([mac, device]) => {
+      if (!device.tvIp) return;
+      try {
+        const playerIP = await getPlayerIP(device.tvIp);
+        await enterFileManager(playerIP);
+        const raw  = await playerRequest(playerIP, '/mmb/filelist.json');
+        const data = JSON.parse(raw.replace(/,(\s*\])/g, '$1'));
+        const tempFolders = (data.fileinfo ?? []).filter(
+          f => f.type === 0 && f.name.startsWith(SACN_TEMP_PREFIX)
+        );
+        if (tempFolders.length > 0) {
+          results.push({
+            mac, name: device.name, tvIp: device.tvIp,
+            folders: tempFolders.map(f => ({
+              name: f.name,
+              displayName: f.name.slice(SACN_TEMP_PREFIX.length),
+            })),
+          });
+        }
+      } catch { /* player not reachable — skip */ }
+    }));
+    return { devices: results };
+  }
+
+  // GET /api/dmx/:mac/temp-folders
+  if (method === 'GET' && /^\/api\/dmx\/[^/]+\/temp-folders$/.test(pathname)) {
+    const mac    = normalizeMac(pathname.split('/')[3]);
+    const reg    = loadRegistry();
+    const device = reg.devices?.[mac];
+    if (!device?.tvIp) return { error: 'device not found' };
+    const playerIP = await getPlayerIP(device.tvIp);
+    await enterFileManager(playerIP);
+    const raw  = await playerRequest(playerIP, '/mmb/filelist.json');
+    const data = JSON.parse(raw.replace(/,(\s*\])/g, '$1'));
+    const folders = (data.fileinfo ?? []).filter(
+      f => f.type === 0 && f.name.startsWith(SACN_TEMP_PREFIX)
+    ).map(f => ({
+      name:        f.name,
+      displayName: f.name.slice(SACN_TEMP_PREFIX.length),
+    }));
+    return { folders };
+  }
+
+  // DELETE /api/dmx/:mac/temp-folders — delete all _show_* folders
+  if (method === 'DELETE' && /^\/api\/dmx\/[^/]+\/temp-folders$/.test(pathname)) {
+    const mac    = normalizeMac(pathname.split('/')[3]);
+    const reg    = loadRegistry();
+    const device = reg.devices?.[mac];
+    if (!device?.tvIp) return { error: 'device not found' };
+    const playerIP = await getPlayerIP(device.tvIp);
+    await enterFileManager(playerIP);
+    const raw  = await playerRequest(playerIP, '/mmb/filelist.json');
+    const data = JSON.parse(raw.replace(/,(\s*\])/g, '$1'));
+    const tempFolders = (data.fileinfo ?? []).filter(
+      f => f.type === 0 && f.name.startsWith(SACN_TEMP_PREFIX)
+    );
+    let deleted = 0;
+    for (const f of tempFolders) {
+      await playerRequest(playerIP, `/cgi-bin/cgictrl?FD=${encodeURIComponent(f.name)}`, 'POST');
+      log('info', `[temp] deleted "${f.name}" from ${device.tvIp}`);
+      deleted++;
+    }
+    wsBroadcast({ type: 'sacn-temp-update', mac });
+    return { ok: true, deleted };
+  }
+
+  // DELETE /api/dmx/:mac/temp-folders/:folderName — delete one temp folder
+  if (method === 'DELETE' && /^\/api\/dmx\/[^/]+\/temp-folders\/.+$/.test(pathname)) {
+    const parts      = pathname.split('/');
+    const mac        = normalizeMac(parts[3]);
+    const folderName = decodeURIComponent(parts[5]);
+    if (!folderName.startsWith(SACN_TEMP_PREFIX))
+      return { error: 'can only delete _show_ prefixed folders' };
+    const reg    = loadRegistry();
+    const device = reg.devices?.[mac];
+    if (!device?.tvIp) return { error: 'device not found' };
+    const playerIP = await getPlayerIP(device.tvIp);
+    await playerRequest(playerIP, `/cgi-bin/cgictrl?FD=${encodeURIComponent(folderName)}`, 'POST');
+    wsBroadcast({ type: 'sacn-temp-update', mac });
+    return { ok: true };
+  }
+
+  // POST /api/dmx/:mac/temp-upload — multipart: folderName, duration, files
+  if (method === 'POST' && /^\/api\/dmx\/[^/]+\/temp-upload$/.test(pathname)) {
+    const mac    = normalizeMac(pathname.split('/')[3]);
+    const reg    = loadRegistry();
+    const device = reg.devices?.[mac];
+    if (!device?.tvIp) return { error: 'device not found' };
+
+    const contentType = req.headers['content-type'] ?? '';
+    const boundaryMatch = contentType.match(/boundary=(.+)$/i);
+    if (!boundaryMatch) return { error: 'multipart boundary not found' };
+    const boundary = boundaryMatch[1].trim();
+    const rawBody  = await readRawBody(req);
+    const parts    = parseMultipartFull(rawBody, boundary);
+
+    // Extract text fields and files
+    let folderNameRaw = '', durationSecs = 30;
+    const files = [];
+    for (const part of parts) {
+      if (!part.filename) {
+        // Text field
+        if (part.fieldName === 'folderName') folderNameRaw = part.data.toString('utf8').trim();
+        else if (part.fieldName === 'duration') durationSecs = parseInt(part.data.toString('utf8')) || 30;
+      } else {
+        files.push(part);
+      }
+    }
+
+    // Sanitize folder name: strip _show_ prefix if already present, strip slashes
+    const sanitized = folderNameRaw.replace(/^_show_/i, '').replace(/[/\\]/g, '_').trim();
+    if (!sanitized) return { error: 'folderName is required' };
+    const fullName = SACN_TEMP_PREFIX + sanitized;
+
+    if (files.length === 0) return { error: 'no files provided' };
+
+    const playerIP = await getPlayerIP(device.tvIp);
+    await enterFileManager(playerIP);
+
+    // Create the temp folder
+    await createFolder(playerIP, fullName);
+
+    // Navigate into it: find its index in filelist
+    const raw2  = await playerRequest(playerIP, '/mmb/filelist.json');
+    const data2 = JSON.parse(raw2.replace(/,(\s*\])/g, '$1'));
+    const idx   = (data2.fileinfo ?? []).findIndex(f => f.name === fullName);
+    if (idx < 0) return { error: `folder "${fullName}" not found after creation` };
+    await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=${String(idx).padStart(3, '0')}`, 'POST');
+
+    // Upload files in order
+    for (const file of files) {
+      await uploadFileToPlayer(playerIP, file.data, file.filename, file.mime);
+      log('info', `[temp] uploaded "${file.filename}" → ${fullName}`);
+    }
+
+    // Set slide duration and restart
+    await setSlideInterval(playerIP, durationSecs);
+    await restartPlayer(playerIP);
+
+    wsBroadcast({ type: 'sacn-temp-update', mac });
+    return { ok: true, folderName: fullName, fileCount: files.length };
+  }
+
   return { error: `Unknown endpoint: ${method} ${pathname}` };
 }
 
@@ -2673,6 +2910,42 @@ async function uploadFileToPlayer(playerIP, fileBuffer, filename, mime) {
 }
 
 /**
+ * Parse ALL parts from a multipart/form-data body, including text fields.
+ * Returns [{ fieldName, filename?, mime, data, rawHeaders }]
+ * Used by the temp-upload handler which needs both field values and files.
+ */
+function parseMultipartFull(buf, boundary) {
+  const parts = [];
+  const sep   = Buffer.from('--' + boundary);
+  const end   = Buffer.from('--' + boundary + '--');
+  let pos = 0;
+  while (pos < buf.length) {
+    const bStart = buf.indexOf(sep, pos);
+    if (bStart === -1) break;
+    pos = bStart + sep.length;
+    if (buf[pos] === 0x0D && buf[pos + 1] === 0x0A) pos += 2;
+    else break;
+    if (buf.slice(bStart, bStart + end.length).equals(end)) break;
+    const headerEnd = buf.indexOf(Buffer.from('\r\n\r\n'), pos);
+    if (headerEnd === -1) break;
+    const rawHeaders = buf.slice(pos, headerEnd).toString('utf8');
+    pos = headerEnd + 4;
+    const fieldMatch    = rawHeaders.match(/name="([^"]+)"/i);
+    const filenameMatch = rawHeaders.match(/filename="([^"]+)"/i);
+    const ctMatch       = rawHeaders.match(/Content-Type:\s*(\S+)/i);
+    const fieldName     = fieldMatch ? fieldMatch[1] : '';
+    const filename      = filenameMatch ? filenameMatch[1] : undefined;
+    const mime          = ctMatch ? ctMatch[1] : 'text/plain';
+    const nextBound     = buf.indexOf(sep, pos);
+    if (nextBound === -1) break;
+    const data = buf.slice(pos, nextBound - 2);
+    parts.push({ fieldName, filename, mime, data, rawHeaders });
+    pos = nextBound;
+  }
+  return parts;
+}
+
+/**
  * Parse a multipart/form-data body into an array of { filename, mime, data } objects.
  * Preserves part order (slideshow plays in upload order).
  */
@@ -2975,6 +3248,26 @@ const PLAYER_ROOT         = '/mnt/usb1';
 const INTERVAL_INFINITE   = 99999; // firmware accepts up to 99999s (~27hrs)
 const INTERVAL_DEFAULT    = 30;
 
+// ─── sACN / E1.31 constants ───────────────────────────────────────────────────
+const FFMPEG_PATH            = '/usr/bin/ffmpeg';
+const THUMB_DIR              = path.join(CACHE_DIR, 'thumbs');
+const SACN_PORT              = 5568;
+const SACN_FOLDER_CH_START   = 100;  // CH101 = 0-based index 100
+const SACN_FOLDER_COUNT      = 410;  // CH101–CH510
+const SACN_ACTIVE_THRESHOLD  = 128;  // ≥ this = fader "on"
+const SACN_TEMP_PREFIX       = '_show_';
+const SACN_DISPATCH_DEBOUNCE = 200;  // ms — VCP / input commands
+const SACN_FOLDER_DEBOUNCE   = 2000; // ms — folder switches
+// Input banding for CH3 (input select) and folder-stop fallback
+const SACN_INPUT_BANDS = [
+  { max: 0,   code: null   },   // 0 = no change
+  { max: 50,  code: 0x11   },   // 1–50   HDMI1
+  { max: 100, code: 0x12   },   // 51–100 HDMI2
+  { max: 150, code: 0x0F   },   // 101–150 DP1
+  { max: 200, code: 0x10   },   // 151–200 DP2
+  { max: 255, code: 0x87   },   // 201–255 MediaPlayer
+];
+
 /**
  * Set the AUTO PLAY folder on the media player.
  * mode: 0=off, 1=slideshow, 2=mediapack
@@ -3170,6 +3463,342 @@ async function playFolder(tvIP, folder, session, monitorId, safeInput = SAFE_INP
 function hex(n) { return '0x' + n.toString(16).toUpperCase().padStart(2, '0'); }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Thumbnail generation (ffmpeg)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generate a 320px-wide JPEG thumbnail for a cached asset.
+ * Idempotent — returns existing thumb path if already generated.
+ * Returns the thumb file path on success, or null if ffmpeg fails
+ * (expected for H.264/HEVC video given this router's ffmpeg build).
+ */
+function generateThumbnail(hash, ext) {
+  const src  = cacheFilePath(hash, ext);
+  const dest = path.join(THUMB_DIR, hash + '.jpg');
+  return new Promise(resolve => {
+    // Already generated
+    if (fs.existsSync(dest)) { resolve(dest); return; }
+    if (!fs.existsSync(src))  { resolve(null); return; }
+
+    const isVideo = /\.(mp4|mov|avi|mkv|wmv|webm)$/i.test(ext);
+    const args = isVideo
+      ? ['-y', '-i', src, '-ss', '1', '-vframes', '1', '-vf', 'scale=320:-1', dest]
+      : ['-y', '-i', src, '-vf', 'scale=320:-1', dest];
+
+    const proc = spawn(FFMPEG_PATH, args, { stdio: 'ignore' });
+    proc.on('close', code => {
+      if (code === 0 && fs.existsSync(dest)) {
+        resolve(dest);
+      } else {
+        if (code !== 0) log('info', `[thumb] ffmpeg exit ${code} for ${hash}${ext} (H.264 expected)`);
+        resolve(null);
+      }
+    });
+    proc.on('error', e => { log('warn', `[thumb] spawn failed: ${e.message}`); resolve(null); });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// sACN / E1.31 listener
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Parse an E1.31 sACN UDP packet.
+ * Returns { universe, dmx } or null if the packet is not valid sACN DMX data.
+ */
+function parseSacnPacket(buf) {
+  if (buf.length < 126) return null;
+  // Preamble size must be 0x0010
+  if (buf.readUInt16BE(0) !== 0x0010) return null;
+  // ACN packet identifier: "ASC-E1.17\0\0\0" at bytes 4–15
+  const ACN_ID = Buffer.from([0x41,0x73,0x63,0x2D,0x45,0x31,0x2E,0x31,0x37,0x00,0x00,0x00]);
+  if (!buf.slice(4, 16).equals(ACN_ID)) return null;
+  // Root layer vector must be 0x00000004 (VECTOR_ROOT_E131_DATA)
+  if (buf.readUInt32BE(18) !== 0x00000004) return null;
+  // Framing layer vector must be 0x00000002 (VECTOR_E131_DATA_PACKET)
+  if (buf.readUInt32BE(40) !== 0x00000002) return null;
+  const universe  = buf.readUInt16BE(113);
+  const propCount = buf.readUInt16BE(123);
+  if (buf.length < 126 + propCount - 1) return null;
+  // Byte at offset 125 is the start code (must be 0x00 for standard DMX)
+  if (buf[125] !== 0x00) return null;
+  const dmx = buf.slice(126, 126 + propCount - 1); // up to 512 bytes
+  return { universe, dmx };
+}
+
+/** Return the multicast address for a given sACN universe number. */
+function sacnMulticastAddr(universe) {
+  return `239.255.${(universe >> 8) & 0xFF}.${universe & 0xFF}`;
+}
+
+/** Map a 0–255 DMX channel value to a NEC VCP input code via banding. Returns null for "no change". */
+function sacnInputCode(value) {
+  for (const band of SACN_INPUT_BANDS) {
+    if (value <= band.max) return band.code;
+  }
+  return null;
+}
+
+/** Get or open a persistent NEC session for sACN control of a device. */
+async function getSacnSession(mac) {
+  const existing = sacnSessions.get(mac);
+  if (existing) {
+    // Verify session is still alive
+    try { await existing.session.vcpGet(existing.monitorId, 0x00, 0xD6); return existing; }
+    catch { sacnSessions.delete(mac); }
+  }
+  const reg    = loadRegistry();
+  const device = reg.devices?.[mac];
+  if (!device?.tvIp) throw new Error(`No tvIp for MAC ${mac}`);
+  const session = await openTcpSession(device.tvIp, { port: 7142, keepAlive: true });
+  const entry   = { session, monitorId: 1 };
+  sacnSessions.set(mac, entry);
+  return entry;
+}
+
+/** Join a multicast group for a universe (idempotent). */
+function joinUniverse(universe) {
+  if (!sacnSocket.sock) return;
+  const addr = sacnMulticastAddr(universe);
+  if (sacnSocket.joined.has(addr)) return;
+  try { sacnSocket.sock.addMembership(addr); sacnSocket.joined.add(addr); }
+  catch (e) { log('warn', `[sACN] addMembership ${addr} failed: ${e.message}`); }
+}
+
+/** Leave a multicast group for a universe. */
+function leaveUniverse(universe) {
+  if (!sacnSocket.sock) return;
+  const addr = sacnMulticastAddr(universe);
+  if (!sacnSocket.joined.has(addr)) return;
+  try { sacnSocket.sock.dropMembership(addr); sacnSocket.joined.delete(addr); }
+  catch { /* ignore */ }
+}
+
+/**
+ * Handle CH1 (enable/show mode). No debounce — scheduler inhibit must be instant.
+ */
+function sacnHandleEnable(mac, value) {
+  const st = sacnState.get(mac);
+  if (!st) return;
+  const showMode = value > 0;
+  if (st.showMode === showMode) return;
+  st.showMode = showMode;
+  log('info', `[sACN] ${mac} show mode ${showMode ? 'ON' : 'OFF'}`);
+  wsBroadcast({ type: 'sacn-status', mac, showMode });
+}
+
+/**
+ * Handle VCP channels (CH2–CH9): power, input, brightness, contrast, backlight,
+ * sharpness, volume, colour temp. Only sends NEC commands when values change.
+ */
+async function sacnHandleVcp(mac, dmx) {
+  const st = sacnState.get(mac);
+  if (!st) return;
+  let sess;
+  try { sess = await getSacnSession(mac); }
+  catch (e) { log('warn', `[sACN] VCP session failed for ${mac}: ${e.message}`); return; }
+  const { session: s, monitorId: mid } = sess;
+
+  // CH2 (index 1) — power: 0–127 = standby (0x04), 128–255 = on (0x01)
+  const powerVal = dmx[1] !== undefined ? dmx[1] : 0;
+  const powerVcp = powerVal < 128 ? 0x04 : 0x01;
+  if (st.lastSent.power !== powerVcp) {
+    try { await s.vcpSet(mid, 0x00, 0xD6, powerVcp); st.lastSent.power = powerVcp; }
+    catch (e) { log('warn', `[sACN] power set failed: ${e.message}`); }
+  }
+
+  // CH3 (index 2) — input select
+  if (dmx[2] !== undefined && dmx[2] > 0) {
+    const inputCode = sacnInputCode(dmx[2]);
+    if (inputCode && st.lastSent.input !== inputCode) {
+      try { await s.vcpSet(mid, 0x00, 0x60, inputCode); st.lastSent.input = inputCode; }
+      catch (e) { log('warn', `[sACN] input set failed: ${e.message}`); }
+    }
+  }
+
+  // CH4–9: brightness, contrast, backlight, sharpness, volume, colour temp
+  const vcpMap = [
+    { idx: 3, key: 'brightness', page: 0x00, code: 0x10 },
+    { idx: 4, key: 'contrast',   page: 0x00, code: 0x12 },
+    { idx: 5, key: 'backlight',  page: 0x00, code: 0x13 },
+    { idx: 6, key: 'sharpness',  page: 0x00, code: 0x87 },
+    { idx: 7, key: 'volume',     page: 0x00, code: 0x62 },
+    { idx: 8, key: 'colorTemp',  page: 0x00, code: 0x14 },
+  ];
+  for (const { idx, key, page, code } of vcpMap) {
+    if (dmx[idx] === undefined) continue;
+    const scaled = Math.round(dmx[idx] / 255 * 100);
+    if (st.lastSent[key] === scaled) continue;
+    try { await s.vcpSet(mid, page, code, scaled); st.lastSent[key] = scaled; }
+    catch (e) { log('warn', `[sACN] VCP ${key} set failed: ${e.message}`); }
+  }
+}
+
+/**
+ * Handle folder fader channels (CH101–510).
+ * 0 active → stop (switch to CH3 input)
+ * 1 active → play that folder
+ * 2+ active → hold (crossfade in progress)
+ */
+async function sacnHandleFolders(mac, dmx) {
+  const reg    = loadRegistry();
+  const device = reg.devices?.[mac];
+  if (!device) return;
+  const folders = reg.devices[mac].sacnFolders ?? [];
+
+  // Collect active faders (≥ threshold) in the folder channel range
+  const active = [];
+  for (let i = 0; i < SACN_FOLDER_COUNT; i++) {
+    const chIdx = SACN_FOLDER_CH_START + i; // 0-based index into dmx array
+    if (chIdx >= 512) break;
+    const val = dmx[chIdx] ?? 0;
+    if (val >= SACN_ACTIVE_THRESHOLD) {
+      const ch      = chIdx + 1; // 1-based channel number
+      const folderCfg = folders.find(f => f.channel === ch);
+      if (folderCfg) active.push(folderCfg);
+    }
+  }
+
+  if (active.length > 1) {
+    // Crossfade window — hold, do nothing
+    return;
+  }
+
+  if (active.length === 0) {
+    // All faders off — stop playback, switch to CH3 input
+    await sacnStopPlayback(mac, dmx[2] ?? 0);
+    return;
+  }
+
+  // Exactly one active folder
+  const folder = active[0];
+  if (device.autoplay === folder.name) return; // already playing
+
+  log('info', `[sACN] ${mac} → folder "${folder.name}" (ch ${folder.channel})`);
+  try {
+    await playFolder(device.tvIp, folder.name, null, 1);
+    reg.devices[mac].autoplay = folder.name;
+    saveRegistry(reg);
+  } catch (e) {
+    log('warn', `[sACN] playFolder failed for ${mac}: ${e.message}`);
+  }
+}
+
+/** Stop media player and switch TV to the input specified by CH3 value. */
+async function sacnStopPlayback(mac, inputChannelValue) {
+  const reg    = loadRegistry();
+  const device = reg.devices?.[mac];
+  if (!device) return;
+
+  // Clear autoplay on player
+  try {
+    const playerIP = await getPlayerIP(device.tvIp);
+    await playerRequest(playerIP, '/cgi-bin/cgictrl?V=S,2A,2,0,0,%00,', 'POST');
+  } catch { /* player may not be reachable — continue with TV input switch */ }
+
+  // Switch TV input
+  const inputCode = (inputChannelValue > 0) ? sacnInputCode(inputChannelValue) : SAFE_INPUT;
+  if (!inputCode) return;
+  try {
+    const { session: s, monitorId: mid } = await getSacnSession(mac);
+    await s.vcpSet(mid, 0x00, 0x60, inputCode);
+    reg.devices[mac].autoplay = null;
+    saveRegistry(reg);
+  } catch (e) { log('warn', `[sACN] stop input switch failed: ${e.message}`); }
+}
+
+/**
+ * Receive and dispatch a parsed sACN DMX frame for a device.
+ * Diffs incoming values against stored state, debounces dispatch.
+ */
+function sacnReceive(mac, incomingDmx) {
+  if (!sacnState.has(mac)) {
+    sacnState.set(mac, {
+      dmx:      new Uint8Array(512),
+      lastPacket: 0,
+      showMode: false,
+      timers:   {},
+      lastSent: {},
+    });
+  }
+  const st = sacnState.get(mac);
+  st.lastPacket = Date.now();
+
+  // Compute which channel groups changed
+  let vcpChanged    = false;
+  let folderChanged = false;
+  const oldDmx = st.dmx;
+  const newDmx = new Uint8Array(512);
+  for (let i = 0; i < Math.min(incomingDmx.length, 512); i++) newDmx[i] = incomingDmx[i];
+
+  // CH1 (index 0) — enable/show mode, no debounce
+  if (newDmx[0] !== oldDmx[0]) sacnHandleEnable(mac, newDmx[0]);
+
+  // CH2–9 (indices 1–8)
+  for (let i = 1; i <= 8; i++) { if (newDmx[i] !== oldDmx[i]) { vcpChanged = true; break; } }
+
+  // CH101–510 (indices 100–509)
+  for (let i = SACN_FOLDER_CH_START; i < SACN_FOLDER_CH_START + SACN_FOLDER_COUNT && i < 512; i++) {
+    if (newDmx[i] !== oldDmx[i]) { folderChanged = true; break; }
+  }
+
+  // Store snapshot
+  st.dmx = newDmx;
+
+  if (vcpChanged) {
+    clearTimeout(st.timers.vcp);
+    const snap = newDmx.slice(); // capture for closure
+    st.timers.vcp = setTimeout(() => sacnHandleVcp(mac, snap).catch(e => log('warn', `[sACN] VCP err: ${e.message}`)), SACN_DISPATCH_DEBOUNCE);
+  }
+
+  if (folderChanged) {
+    clearTimeout(st.timers.folder);
+    const snap = newDmx.slice();
+    st.timers.folder = setTimeout(() => sacnHandleFolders(mac, snap).catch(e => log('warn', `[sACN] folder err: ${e.message}`)), SACN_FOLDER_DEBOUNCE);
+  }
+
+  // Broadcast live channel values to dashboard (rate-limited: only when something changed)
+  if (vcpChanged || folderChanged || newDmx[0] !== oldDmx[0]) {
+    wsBroadcast({ type: 'sacn-update', mac, channels: Array.from(newDmx) });
+  }
+}
+
+/** Start the sACN UDP listener. Called once at server startup. */
+function startSacnListener() {
+  fs.mkdirSync(THUMB_DIR, { recursive: true });
+
+  const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+  sacnSocket.sock = sock;
+
+  sock.on('error', e => log('warn', `[sACN] socket error: ${e.message}`));
+
+  sock.on('message', (msg) => {
+    const parsed = parseSacnPacket(msg);
+    if (!parsed) return;
+    const { universe, dmx } = parsed;
+    // Find device assigned to this universe
+    const reg = loadRegistry();
+    for (const [mac, device] of Object.entries(reg.devices ?? {})) {
+      if (device.sacnUniverse === universe) {
+        sacnReceive(mac, dmx);
+        break;
+      }
+    }
+  });
+
+  sock.on('listening', () => {
+    // Join multicast groups for all currently registered universes
+    const reg = loadRegistry();
+    for (const device of Object.values(reg.devices ?? {})) {
+      if (device.sacnUniverse) joinUniverse(device.sacnUniverse);
+    }
+    log('info', `[sACN] listening on UDP :${SACN_PORT}`);
+  });
+
+  sock.bind(SACN_PORT);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HTTP server
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3189,6 +3818,18 @@ const server = http.createServer(async (req, res) => {
       res.end(html);
     } catch {
       res.writeHead(500); res.end('index.html not found — place it next to server.js');
+    }
+    return;
+  }
+
+  // Serve per-universe DMX operator dashboard  GET /dmx/:universe
+  if (method === 'GET' && /^\/dmx\/\d+$/.test(path)) {
+    try {
+      const html = fs.readFileSync(new URL('./dmx-dashboard.html', import.meta.url));
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch {
+      res.writeHead(500); res.end('dmx-dashboard.html not found');
     }
     return;
   }
@@ -3214,10 +3855,40 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /api/cache/:hash/thumb — generate and serve JPEG thumbnail via ffmpeg
+  if (method === 'GET' && /^\/api\/cache\/[0-9a-f]{64}\/thumb$/.test(path)) {
+    const hash = path.split('/')[3];
+    try {
+      const meta    = JSON.parse(await fs.promises.readFile(cacheSidecarPath(hash), 'utf8'));
+      const dotIdx  = meta.originalName.lastIndexOf('.');
+      const ext     = dotIdx >= 0 ? meta.originalName.slice(dotIdx) : '';
+      const thumb   = await generateThumbnail(hash, ext);
+      if (thumb) {
+        const stat = await fs.promises.stat(thumb);
+        res.writeHead(200, {
+          'Content-Type': 'image/jpeg',
+          'Content-Length': stat.size,
+          'Cache-Control': 'public, max-age=31536000, immutable',
+        });
+        fs.createReadStream(thumb).pipe(res);
+      } else {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'no-thumb', mime: meta.mime }));
+      }
+    } catch {
+      res.writeHead(404); res.end('Not found');
+    }
+    return;
+  }
+
   // JSON API
   if (path.startsWith('/api/')) {
-    // cache/store and emergency-upload carry raw multipart — handle before readJson
-    if (method === 'POST' && (path === '/api/cache/store' || path === '/api/emergency-upload')) {
+    // cache/store, emergency-upload, and dmx temp-upload carry raw multipart — handle before readJson
+    if (method === 'POST' && (
+      path === '/api/cache/store' ||
+      path === '/api/emergency-upload' ||
+      /^\/api\/dmx\/[^/]+\/temp-upload$/.test(path)
+    )) {
       try {
         const result = await handleApi(method, path, {}, req);
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -3279,6 +3950,9 @@ function readRawBody(req) {
 
 server.listen(PORT, () => {
   console.log(`\n  NEC Monitor Control Console  →  http://localhost:${PORT}\n`);
+
+  // Start the sACN / E1.31 UDP listener
+  startSacnListener();
 
   // Start the event scheduler — runs every 60 seconds + on startup
   checkSchedule().catch(e => log('warn', `[scheduler] startup check failed: ${e.message}`));

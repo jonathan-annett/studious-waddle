@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DMX Dashboard</title>
+<style>
+:root {
+  --bg:       #0a0c0f;
+  --surface:  #111318;
+  --border:   #1e2230;
+  --accent:   #00e5a0;
+  --accent2:  #0088ff;
+  --warn:     #ff9500;
+  --danger:   #ff3b30;
+  --ok:       #00e5a0;
+  --text:     #c8d0e0;
+  --muted:    #4a5270;
+  --mono:     'IBM Plex Mono', 'Courier New', monospace;
+  --sans:     'IBM Plex Sans', system-ui, sans-serif;
+  --mode-bg:  #0a0c0f;
+}
+body {
+  margin: 0; padding: 0;
+  background: var(--mode-bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  transition: background 0.5s ease;
+}
+body.console-mode  { --mode-bg: #040d1c; }
+body.console-lost  { --mode-bg: #1a0e00; }
+
+/* In console mode, all interactive controls are display-only */
+body.console-mode .ctrl { pointer-events: none; opacity: 0.95; }
+/* Exception: the "take manual control" button stays active */
+body.console-mode .ctrl-override { pointer-events: auto; opacity: 1; }
+
+/* ── Header ── */
+#header {
+  padding: 10px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+#header h1 {
+  font-family: var(--mono); font-size: 14px; font-weight: 700;
+  color: var(--accent); margin: 0; text-transform: uppercase; letter-spacing: .08em;
+}
+#universe-badge {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  background: var(--bg); padding: 2px 8px; border-radius: 3px;
+  border: 1px solid var(--border);
+}
+#status-badge {
+  font-family: var(--mono); font-size: 11px; padding: 2px 10px;
+  border-radius: 3px; border: 1px solid; transition: all 0.3s;
+}
+#status-badge.console  { color: var(--accent2); border-color: var(--accent2); background: rgba(0,136,255,.08); }
+#status-badge.manual   { color: var(--muted);   border-color: var(--border);  background: transparent; }
+#status-badge.lost     { color: var(--warn);    border-color: var(--warn);    background: rgba(255,149,0,.1); }
+#take-control-btn {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+  padding: 3px 10px; background: transparent; border: 1px solid var(--warn);
+  color: var(--warn); border-radius: 3px; cursor: pointer;
+  display: none;
+}
+#take-control-btn:hover { background: rgba(255,149,0,.15); }
+#header-spacer { flex: 1; }
+
+/* ── Subheader ── */
+#subheader {
+  padding: 6px 16px; background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono); font-size: 10px; color: var(--muted);
+  display: flex; gap: 16px; flex-wrap: wrap;
+}
+.sh-item { display: flex; gap: 4px; align-items: center; }
+.sh-val  { color: var(--text); }
+
+/* ── Main layout ── */
+#main {
+  padding: 12px 16px;
+  max-width: 1200px;
+}
+
+/* ── Action row (Blackout + Power + Input) ── */
+#action-row {
+  display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; align-items: center;
+}
+#blackout-btn {
+  font-family: var(--mono); font-size: 13px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .1em; padding: 10px 24px;
+  background: var(--danger); color: #fff; border: none; border-radius: 5px; cursor: pointer;
+  transition: opacity .15s;
+}
+#blackout-btn:hover { opacity: .85; }
+body.console-mode #blackout-btn { pointer-events: none; opacity: .5; }
+.power-btn {
+  font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing:.06em;
+  padding: 8px 16px; border-radius: 4px; cursor: pointer; border: 1px solid;
+  transition: all .15s;
+}
+.power-on  { color: var(--accent);  border-color: var(--accent);  background: rgba(0,229,160,.08); }
+.power-off { color: var(--danger);  border-color: var(--danger);  background: rgba(255,59,48,.08); }
+.power-on:hover  { background: rgba(0,229,160,.18); }
+.power-off:hover { background: rgba(255,59,48,.18); }
+.input-sep { width: 1px; height: 28px; background: var(--border); margin: 0 4px; }
+.input-btn {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing:.05em;
+  padding: 6px 12px; border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  transition: all .15s;
+}
+.input-btn:hover, .input-btn.active {
+  border-color: var(--accent2); color: var(--accent2); background: rgba(0,136,255,.1);
+}
+
+/* ── Section headers ── */
+.section-header {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--muted); padding: 8px 0 6px;
+  border-top: 1px solid var(--border); margin-top: 10px;
+  display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
+}
+.section-header:first-of-type { border-top: none; margin-top: 0; }
+.section-toggle { margin-left: auto; font-size: 9px; }
+
+/* ── Folder grid ── */
+#folder-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.folder-btn {
+  position: relative; border-radius: 6px; overflow: hidden;
+  border: 1px solid var(--border); background: var(--surface);
+  cursor: pointer; transition: border-color .15s, box-shadow .15s;
+  aspect-ratio: 1; display: flex; flex-direction: column;
+}
+.folder-btn:hover { border-color: var(--accent2); }
+.folder-btn.active {
+  border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent);
+}
+.folder-btn.crossfade {
+  border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn);
+  animation: cfpulse 0.8s ease-in-out infinite alternate;
+}
+@keyframes cfpulse { from { opacity: 1; } to { opacity: 0.6; } }
+.folder-thumb {
+  width: 100%; flex: 1; object-fit: cover; background: #000; display: block;
+}
+.folder-thumb-placeholder {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  background: #000; font-size: 28px; color: var(--muted);
+}
+.folder-info {
+  padding: 4px 6px 5px;
+  background: rgba(0,0,0,.7);
+  position: absolute; bottom: 0; left: 0; right: 0;
+}
+.folder-ch {
+  font-family: var(--mono); font-size: 8px; color: var(--muted); line-height: 1;
+}
+.folder-name {
+  font-size: 10px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.3;
+}
+.folder-temp-badge {
+  position: absolute; top: 4px; right: 4px;
+  font-size: 8px; font-family: var(--mono);
+  background: var(--warn); color: #000; padding: 1px 4px; border-radius: 2px;
+}
+
+/* ── Bespoke upload ── */
+#bespoke-body { margin-bottom: 8px; }
+#drop-zone {
+  border: 2px dashed var(--border); border-radius: 6px; padding: 20px 12px;
+  text-align: center; color: var(--muted); font-size: 11px;
+  cursor: pointer; transition: border-color .15s, color .15s; margin-bottom: 10px;
+}
+#drop-zone.drag-over { border-color: var(--accent2); color: var(--accent2); }
+#drop-zone input[type=file] { display: none; }
+.upload-form-row {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 8px;
+}
+.upload-form-row label { font-size: 10px; color: var(--muted); display: block; margin-bottom: 3px; }
+.upload-form-row input[type=text],
+.upload-form-row input[type=number] {
+  font-family: var(--mono); font-size: 11px; padding: 4px 8px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 3px;
+}
+#temp-folder-list { margin-top: 8px; }
+.temp-item {
+  display: flex; align-items: center; gap: 8px; padding: 5px 0;
+  border-bottom: 1px solid var(--border); font-size: 11px; flex-wrap: wrap;
+}
+.temp-item-name { flex: 1; color: var(--warn); font-family: var(--mono); font-size: 10px; }
+#cleanup-all-btn {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+  padding: 5px 14px; background: transparent;
+  border: 1px solid var(--warn); color: var(--warn); border-radius: 3px; cursor: pointer;
+  margin-top: 10px;
+}
+#cleanup-all-btn:hover { background: rgba(255,149,0,.12); }
+
+/* ── Level sliders ── */
+#levels-body { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 20px; }
+@media (max-width: 500px) { #levels-body { grid-template-columns: 1fr; } }
+.level-row { display: flex; flex-direction: column; gap: 4px; }
+.level-label { font-size: 10px; color: var(--muted); font-family: var(--mono); display: flex; justify-content: space-between; }
+.level-val { color: var(--accent2); }
+input[type=range] {
+  width: 100%; accent-color: var(--accent2); cursor: pointer;
+}
+body.console-mode input[type=range] { cursor: default; }
+
+/* ── Console monitor ── */
+#console-body { display: none; }
+body.console-mode #console-body { display: block; }
+.ch-bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 10px; }
+.ch-bar-label { font-family: var(--mono); color: var(--muted); width: 60px; flex-shrink: 0; }
+.ch-bar-track { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.ch-bar-fill  { height: 100%; background: var(--accent2); border-radius: 3px; transition: width .1s; }
+.ch-bar-val   { font-family: var(--mono); color: var(--muted); width: 30px; text-align: right; flex-shrink: 0; }
+
+/* ── Upload progress ── */
+#upload-status { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 6px; min-height: 14px; }
+
+/* ── Mobile ── */
+@media (max-width: 600px) {
+  #header h1 { font-size: 12px; }
+  #folder-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
+  #blackout-btn { font-size: 11px; padding: 8px 16px; }
+}
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1 id="tv-name">DMX Dashboard</h1>
+  <span id="universe-badge">Universe —</span>
+  <span id="status-badge" class="manual">○ MANUAL</span>
+  <button id="take-control-btn" class="ctrl-override" onclick="takeManualControl()">
+    Take Manual Control
+  </button>
+  <span id="header-spacer"></span>
+  <a href="/" style="font-size:10px;color:var(--muted);text-decoration:none;
+     font-family:var(--mono)">← Main UI</a>
+</div>
+
+<div id="subheader">
+  <div class="sh-item">playing: <span class="sh-val" id="sh-playing">—</span></div>
+  <div class="sh-item">power: <span class="sh-val" id="sh-power">—</span></div>
+  <div class="sh-item">input: <span class="sh-val" id="sh-input">—</span></div>
+  <div class="sh-item" id="sh-console-info" style="display:none">
+    console: <span class="sh-val" id="sh-last-packet">—</span>
+  </div>
+</div>
+
+<div id="main">
+
+  <!-- Action row -->
+  <div id="action-row">
+    <button id="blackout-btn" onclick="doBlackout()">■ BLACKOUT</button>
+    <div class="input-sep"></div>
+    <button class="power-btn power-on  ctrl" onclick="doPower('on')">Power On</button>
+    <button class="power-btn power-off ctrl" onclick="doPower('off')">Power Off</button>
+    <div class="input-sep"></div>
+    <button class="input-btn ctrl" data-input="0x11" onclick="doInput(0x11)">HDMI1</button>
+    <button class="input-btn ctrl" data-input="0x12" onclick="doInput(0x12)">HDMI2</button>
+    <button class="input-btn ctrl" data-input="0x0F" onclick="doInput(0x0F)">DP1</button>
+    <button class="input-btn ctrl" data-input="0x10" onclick="doInput(0x10)">DP2</button>
+    <button class="input-btn ctrl" data-input="0x87" onclick="doInput(0x87)">Media Player</button>
+  </div>
+
+  <!-- Folder grid -->
+  <div class="section-header" onclick="toggleSection('folders')">
+    Folders <span class="section-toggle" id="toggle-folders">▼</span>
+  </div>
+  <div id="folders-body">
+    <div id="folder-grid"></div>
+  </div>
+
+  <!-- Bespoke content -->
+  <div class="section-header" onclick="toggleSection('bespoke')">
+    Bespoke Content <span class="section-toggle" id="toggle-bespoke">▼</span>
+  </div>
+  <div id="bespoke-body">
+    <div id="drop-zone" onclick="document.getElementById('file-input').click()"
+         ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
+      <input type="file" id="file-input" multiple accept="image/*,video/*"
+             onchange="onFilesSelected(this.files)">
+      <div>↓ Drop files here or click to browse</div>
+      <div style="font-size:9px;margin-top:4px;color:var(--border)">
+        Images and video — all files go into one temporary folder</div>
+    </div>
+    <div class="upload-form-row">
+      <div>
+        <label>Folder name</label>
+        <input type="text" id="upload-folder-name" placeholder="ClientLogoV2" style="width:180px">
+      </div>
+      <div>
+        <label>Seconds per slide</label>
+        <input type="number" id="upload-duration" value="30" min="5" max="99999" style="width:70px">
+      </div>
+      <div style="padding-bottom:1px">
+        <button class="power-btn power-on ctrl" style="font-size:10px;padding:5px 14px"
+          onclick="doUpload()">⬆ Upload</button>
+      </div>
+    </div>
+    <div id="upload-status"></div>
+    <div id="temp-folder-list"></div>
+    <button id="cleanup-all-btn" onclick="doCleanupAll()" style="display:none">
+      End Show — Remove All Temporary Content
+    </button>
+  </div>
+
+  <!-- Levels -->
+  <div class="section-header" onclick="toggleSection('levels')">
+    Levels <span class="section-toggle" id="toggle-levels">▼</span>
+  </div>
+  <div id="levels-body">
+    <div class="level-row">
+      <div class="level-label">Brightness <span class="level-val" id="lv-brightness">—</span></div>
+      <input type="range" min="0" max="100" value="0" class="ctrl"
+        id="sl-brightness" oninput="onSlider('brightness',this.value)"
+        onchange="doVcp(0x00,0x10,this.value)">
+    </div>
+    <div class="level-row">
+      <div class="level-label">Contrast <span class="level-val" id="lv-contrast">—</span></div>
+      <input type="range" min="0" max="100" value="0" class="ctrl"
+        id="sl-contrast" oninput="onSlider('contrast',this.value)"
+        onchange="doVcp(0x00,0x12,this.value)">
+    </div>
+    <div class="level-row">
+      <div class="level-label">Backlight <span class="level-val" id="lv-backlight">—</span></div>
+      <input type="range" min="0" max="100" value="0" class="ctrl"
+        id="sl-backlight" oninput="onSlider('backlight',this.value)"
+        onchange="doVcp(0x00,0x13,this.value)">
+    </div>
+    <div class="level-row">
+      <div class="level-label">Sharpness <span class="level-val" id="lv-sharpness">—</span></div>
+      <input type="range" min="0" max="100" value="0" class="ctrl"
+        id="sl-sharpness" oninput="onSlider('sharpness',this.value)"
+        onchange="doVcp(0x00,0x87,this.value)">
+    </div>
+    <div class="level-row">
+      <div class="level-label">Volume <span class="level-val" id="lv-volume">—</span></div>
+      <input type="range" min="0" max="100" value="0" class="ctrl"
+        id="sl-volume" oninput="onSlider('volume',this.value)"
+        onchange="doVcp(0x00,0x62,this.value)">
+    </div>
+  </div>
+
+  <!-- Console monitor -->
+  <div class="section-header" onclick="toggleSection('console')">
+    Console Monitor <span class="section-toggle" id="toggle-console">▼</span>
+  </div>
+  <div id="console-body">
+    <div id="console-bars"></div>
+  </div>
+
+</div><!-- #main -->
+
+<script>
+'use strict';
+
+// ── State ──────────────────────────────────────────────────────────────────
+const universe  = parseInt(location.pathname.split('/').pop(), 10);
+let deviceMac   = null;
+let deviceTvIp  = null;
+let sessionId   = null;
+let folders     = [];     // [{ channel, name, folderPath, groupId? }]
+let tempFolders = [];     // [{ name, displayName }]
+let uploadFiles = [];
+let ws          = null;
+let consoleMode = false;  // true = sACN CH1 > 0
+let lastPacketMs = null;
+let packetTimeoutHandle = null;
+let currentChannels = new Array(512).fill(0);
+let currentInput    = null; // last known input VCP code
+let currentPlaying  = null; // last known folder name
+const INPUT_NAMES   = { 0x11:'HDMI1', 0x12:'HDMI2', 0x0F:'DP1', 0x10:'DP2', 0x87:'Media Player' };
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+async function boot() {
+  document.getElementById('universe-badge').textContent = `Universe ${universe}`;
+  document.title = `DMX — Universe ${universe}`;
+
+  // Find device for this universe
+  try {
+    const r = await fetch('/api/sacn').then(x => x.json());
+    const entry = (r.universes ?? []).find(u => u.universe === universe);
+    if (!entry) { showError('No device assigned to universe ' + universe); return; }
+    deviceMac  = entry.mac;
+    deviceTvIp = entry.tvIp;
+    document.getElementById('tv-name').textContent = entry.name || entry.tvIp;
+    document.title = `DMX — ${entry.name || 'Universe ' + universe}`;
+  } catch(e) { showError('Could not reach server: ' + e.message); return; }
+
+  // Open NEC session for manual control
+  try {
+    const r = await fetch('/api/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: deviceTvIp }),
+    }).then(x => x.json());
+    if (r.sessionId) sessionId = r.sessionId;
+  } catch { /* session optional — blackout/VCP won't work without it */ }
+
+  await loadFolders();
+  await loadTempFolders();
+
+  // Load current sACN state (in case server already has DMX data)
+  try {
+    const st = await fetch(`/api/sacn/${deviceMac}/state`).then(x => x.json());
+    currentChannels = st.channels ?? currentChannels;
+    if (st.showMode) setConsoleMode(true);
+  } catch {}
+
+  initWs();
+  window.addEventListener('beforeunload', cleanup);
+}
+
+function showError(msg) {
+  document.getElementById('main').innerHTML =
+    `<div style="color:var(--danger);font-family:var(--mono);padding:24px">${msg}</div>`;
+}
+
+async function cleanup() {
+  if (sessionId) {
+    try { fetch(`/api/connect/${sessionId}`, { method: 'DELETE', keepalive: true }); }
+    catch {}
+  }
+}
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+function initWs() {
+  ws = new WebSocket('ws://' + location.host);
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'sacn-update' && msg.mac === deviceMac) onSacnUpdate(msg.channels);
+    if (msg.type === 'sacn-status' && msg.mac === deviceMac) setConsoleMode(msg.showMode);
+    if (msg.type === 'sacn-temp-update' && msg.mac === deviceMac) loadTempFolders();
+  };
+  ws.onclose = () => setTimeout(initWs, 2000);
+}
+
+// ── Console mode switching ─────────────────────────────────────────────────
+function setConsoleMode(active) {
+  consoleMode = active;
+  document.body.className = active ? 'console-mode' : '';
+  const badge   = document.getElementById('status-badge');
+  const takeBtn = document.getElementById('take-control-btn');
+  const shInfo  = document.getElementById('sh-console-info');
+  if (active) {
+    badge.className = 'console'; badge.textContent = '● CONSOLE';
+    takeBtn.style.display = 'inline-block';
+    shInfo.style.display  = 'flex';
+  } else {
+    badge.className = 'manual'; badge.textContent = '○ MANUAL';
+    takeBtn.style.display = 'none';
+    shInfo.style.display  = 'none';
+  }
+}
+
+function onSacnUpdate(channels) {
+  currentChannels = channels;
+  lastPacketMs    = Date.now();
+  document.getElementById('sh-last-packet').textContent = 'live';
+
+  // Reset packet timeout
+  clearTimeout(packetTimeoutHandle);
+  packetTimeoutHandle = setTimeout(() => {
+    if (consoleMode) {
+      document.body.className = 'console-lost';
+      document.getElementById('status-badge').className = 'lost';
+      document.getElementById('status-badge').textContent = '⚠ CONSOLE LOST — MANUAL';
+      document.getElementById('take-control-btn').style.display = 'none';
+      // After amber flash, switch fully to manual
+      setTimeout(() => { setConsoleMode(false); }, 1500);
+    }
+  }, 3000);
+
+  // Update console monitor bars
+  renderConsoleBars(channels);
+
+  // Update folder active states
+  updateFolderActiveStates(channels);
+
+  // Mirror VCP sliders in console mode
+  const vals = [
+    { id:'sl-brightness', lv:'lv-brightness', idx:3, scale:100/255 },
+    { id:'sl-contrast',   lv:'lv-contrast',   idx:4, scale:100/255 },
+    { id:'sl-backlight',  lv:'lv-backlight',  idx:5, scale:100/255 },
+    { id:'sl-sharpness',  lv:'lv-sharpness',  idx:6, scale:100/255 },
+    { id:'sl-volume',     lv:'lv-volume',      idx:7, scale:100/255 },
+  ];
+  for (const v of vals) {
+    const pct = Math.round((channels[v.idx] ?? 0) * v.scale);
+    const sl  = document.getElementById(v.id);
+    const lv  = document.getElementById(v.lv);
+    if (sl) sl.value = pct;
+    if (lv) lv.textContent = pct + '%';
+  }
+}
+
+function takeManualControl() {
+  setConsoleMode(false);
+}
+
+// ── Folder management ──────────────────────────────────────────────────────
+async function loadFolders() {
+  try {
+    const r = await fetch(`/api/sacn/${deviceMac}/folders`).then(x => x.json());
+    folders = r.folders ?? [];
+  } catch { folders = []; }
+  renderFolderGrid();
+}
+
+function renderFolderGrid() {
+  const grid = document.getElementById('folder-grid');
+  if (!folders.length) {
+    grid.innerHTML = `<div style="color:var(--muted);font-size:11px;grid-column:1/-1;padding:8px 0">
+      No folders configured — assign folders in the main UI device card.</div>`;
+    return;
+  }
+  grid.innerHTML = folders.map(f => {
+    const thumbUrl = f.groupId
+      ? null  // will resolve via asset lookup below
+      : null;
+    return `
+    <div class="folder-btn ctrl" id="fbtn-${f.channel}"
+         onclick="doPlayFolder(${JSON.stringify(f.name)},${JSON.stringify(f.folderPath)})">
+      <div class="folder-thumb-placeholder" id="fthumb-${f.channel}">🖼</div>
+      <div class="folder-info">
+        <div class="folder-ch">CH ${f.channel}</div>
+        <div class="folder-name">${esc(f.name)}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Load thumbnails asynchronously
+  for (const f of folders) loadFolderThumb(f);
+}
+
+async function loadFolderThumb(folder) {
+  // Find first asset hash via groupId if available
+  if (!folder.groupId) return;
+  try {
+    const r = await fetch('/api/cache').then(x => x.json());
+    // Find assets in this group by cross-referencing registry
+    const reg = await fetch('/api/events').then(x => x.json()).catch(() => null);
+    // Simpler: just get list of all cache items and try thumbs for them
+    // For groups, the main UI already knows the assets — use the group's first asset
+    const allItems = r.items ?? [];
+    // We don't have direct group→asset mapping in this page, so try the first cached image
+    if (allItems.length) {
+      const firstImage = allItems.find(it => /image/i.test(it.mime));
+      if (firstImage) {
+        await setFolderThumb(folder.channel, firstImage.hash);
+      }
+    }
+  } catch {}
+}
+
+async function setFolderThumb(channel, hash) {
+  const container = document.getElementById(`fthumb-${channel}`);
+  if (!container) return;
+  const img = new Image();
+  img.onload = () => {
+    container.innerHTML = '';
+    img.className = 'folder-thumb';
+    container.appendChild(img);
+    container.className = '';
+  };
+  img.src = `/api/cache/${hash}/thumb`;
+}
+
+function updateFolderActiveStates(channels) {
+  // Count active folder faders
+  const activeChs = [];
+  for (const f of folders) {
+    const idx = f.channel - 1; // 0-based
+    if (idx >= 0 && idx < 512 && (channels[idx] ?? 0) >= 128) activeChs.push(f.channel);
+  }
+  for (const f of folders) {
+    const btn = document.getElementById(`fbtn-${f.channel}`);
+    if (!btn) continue;
+    btn.classList.remove('active', 'crossfade');
+    if (activeChs.includes(f.channel)) {
+      btn.classList.add(activeChs.length > 1 ? 'crossfade' : 'active');
+    }
+  }
+  // Update subheader
+  if (activeChs.length === 1) {
+    const f = folders.find(x => x.channel === activeChs[0]);
+    if (f) {
+      currentPlaying = f.name;
+      document.getElementById('sh-playing').textContent = f.name;
+    }
+  } else if (activeChs.length === 0) {
+    currentPlaying = null;
+    document.getElementById('sh-playing').textContent = '— (stopped)';
+  }
+}
+
+async function doPlayFolder(name, folderPath) {
+  if (consoleMode) return;
+  try {
+    await apiFetch('/api/player/play', 'POST', {
+      sessionId, tvIP: deviceTvIp, folder: name,
+    });
+    currentPlaying = name;
+    document.getElementById('sh-playing').textContent = name;
+    // Highlight button
+    for (const f of folders) {
+      const btn = document.getElementById(`fbtn-${f.channel}`);
+      if (btn) btn.classList.toggle('active', f.name === name);
+    }
+    for (const t of tempFolders) {
+      const btn = document.getElementById(`ftmp-${t.name}`);
+      if (btn) btn.classList.toggle('active', t.name === name);
+    }
+  } catch(e) { alert('Play failed: ' + e.message); }
+}
+
+// ── Temp folders ───────────────────────────────────────────────────────────
+async function loadTempFolders() {
+  if (!deviceMac) return;
+  try {
+    const r = await apiFetch(`/api/dmx/${deviceMac}/temp-folders`, 'GET');
+    tempFolders = r.folders ?? [];
+  } catch { tempFolders = []; }
+  renderTempFolders();
+}
+
+function renderTempFolders() {
+  const list    = document.getElementById('temp-folder-list');
+  const cleanBtn = document.getElementById('cleanup-all-btn');
+  cleanBtn.style.display = tempFolders.length ? 'block' : 'none';
+  if (!tempFolders.length) { list.innerHTML = ''; return; }
+  list.innerHTML = `
+    <div style="font-family:var(--mono);font-size:9px;color:var(--muted);
+         text-transform:uppercase;margin:8px 0 4px">Temporary folders on player</div>
+    ${tempFolders.map(t => `
+    <div class="temp-item">
+      <span class="temp-item-name">⚡ ${esc(t.displayName)}</span>
+      <button class="input-btn ctrl" style="font-size:10px;padding:3px 8px;color:var(--accent)"
+        onclick="doPlayFolder(${JSON.stringify(t.displayName)},${JSON.stringify('/mnt/usb1/' + t.name)})">
+        ▶ Play</button>
+      <button class="input-btn" style="font-size:10px;padding:3px 8px;color:var(--danger)"
+        onclick="doDeleteTemp(${JSON.stringify(t.name)})">Delete</button>
+    </div>`).join('')}`;
+}
+
+async function doDeleteTemp(folderName) {
+  if (!confirm(`Delete temporary folder "${folderName.replace(/^_show_/,'')}"?`)) return;
+  try {
+    await apiFetch(`/api/dmx/${deviceMac}/temp-folders/${encodeURIComponent(folderName)}`, 'DELETE');
+    await loadTempFolders();
+  } catch(e) { alert('Delete failed: ' + e.message); }
+}
+
+async function doCleanupAll() {
+  if (!confirm('Remove ALL temporary folders from this player\'s SD card?')) return;
+  try {
+    await apiFetch(`/api/dmx/${deviceMac}/temp-folders`, 'DELETE');
+    await loadTempFolders();
+  } catch(e) { alert('Cleanup failed: ' + e.message); }
+}
+
+// ── File upload ────────────────────────────────────────────────────────────
+function onDragOver(e) { e.preventDefault(); document.getElementById('drop-zone').classList.add('drag-over'); }
+function onDragLeave()  { document.getElementById('drop-zone').classList.remove('drag-over'); }
+function onDrop(e) {
+  e.preventDefault();
+  onDragLeave();
+  onFilesSelected(e.dataTransfer.files);
+}
+function onFilesSelected(files) {
+  uploadFiles = Array.from(files);
+  const zone  = document.getElementById('drop-zone');
+  if (uploadFiles.length) {
+    zone.querySelector('div').textContent =
+      `${uploadFiles.length} file${uploadFiles.length === 1 ? '' : 's'} selected: ` +
+      uploadFiles.map(f => f.name).join(', ');
+  }
+}
+async function doUpload() {
+  if (!uploadFiles.length) { alert('Select files first.'); return; }
+  const name = document.getElementById('upload-folder-name').value.trim();
+  if (!name) { alert('Enter a folder name.'); return; }
+  const duration = parseInt(document.getElementById('upload-duration').value) || 30;
+  const status   = document.getElementById('upload-status');
+  status.textContent = `Uploading ${uploadFiles.length} file(s)…`;
+  const fd = new FormData();
+  fd.append('folderName', name);
+  fd.append('duration', String(duration));
+  for (const f of uploadFiles) fd.append('file', f, f.name);
+  try {
+    const r = await fetch(`/api/dmx/${deviceMac}/temp-upload`, { method: 'POST', body: fd })
+      .then(x => x.json());
+    if (r.error) throw new Error(r.error);
+    status.textContent = `✓ Uploaded ${r.fileCount} file(s) to "${r.folderName}"`;
+    uploadFiles = [];
+    document.getElementById('drop-zone').querySelector('div').textContent =
+      '↓ Drop files here or click to browse';
+    document.getElementById('upload-folder-name').value = '';
+    await loadTempFolders();
+  } catch(e) { status.textContent = `✗ Upload failed: ${e.message}`; }
+}
+
+// ── NEC commands ───────────────────────────────────────────────────────────
+async function doBlackout() {
+  if (!sessionId) { alert('No TV session — connect first or check server.'); return; }
+  try {
+    await apiFetch('/api/power/set', 'POST', { sessionId, state: 'off' });
+    document.getElementById('sh-power').textContent = 'OFF (standby)';
+  } catch(e) { alert('Blackout failed: ' + e.message); }
+}
+
+async function doPower(state) {
+  if (!sessionId) return;
+  try {
+    await apiFetch('/api/power/set', 'POST', { sessionId, state });
+    document.getElementById('sh-power').textContent = state === 'on' ? 'ON' : 'OFF';
+  } catch(e) { alert('Power failed: ' + e.message); }
+}
+
+async function doInput(code) {
+  if (!sessionId) return;
+  try {
+    await apiFetch('/api/vcp/set', 'POST', { sessionId, opPage: 0, opCode: 0x60, value: code });
+    currentInput = code;
+    document.getElementById('sh-input').textContent = INPUT_NAMES[code] ?? `0x${code.toString(16)}`;
+    document.querySelectorAll('.input-btn').forEach(b => {
+      b.classList.toggle('active', parseInt(b.dataset.input) === code);
+    });
+  } catch(e) { alert('Input switch failed: ' + e.message); }
+}
+
+function onSlider(name, value) {
+  document.getElementById(`lv-${name}`).textContent = value + '%';
+}
+
+async function doVcp(page, code, value) {
+  if (!sessionId || consoleMode) return;
+  try { await apiFetch('/api/vcp/set', 'POST', { sessionId, opPage: page, opCode: code, value: parseInt(value) }); }
+  catch {}
+}
+
+// ── Console monitor bars ───────────────────────────────────────────────────
+const MONITOR_CHANNELS = [
+  { idx: 0,  label: 'CH1 Enable'    },
+  { idx: 1,  label: 'CH2 Power'     },
+  { idx: 2,  label: 'CH3 Input'     },
+  { idx: 3,  label: 'CH4 Bright'    },
+  { idx: 4,  label: 'CH5 Contrast'  },
+  { idx: 5,  label: 'CH6 Backlight' },
+  { idx: 6,  label: 'CH7 Sharp'     },
+  { idx: 7,  label: 'CH8 Volume'    },
+  { idx: 8,  label: 'CH9 ColTemp'   },
+];
+
+function renderConsoleBars(channels) {
+  const el = document.getElementById('console-bars');
+  // Fixed channels first
+  const fixedRows = MONITOR_CHANNELS.map(ch => {
+    const v   = channels[ch.idx] ?? 0;
+    const pct = Math.round(v / 255 * 100);
+    return `<div class="ch-bar-row">
+      <div class="ch-bar-label">${ch.label}</div>
+      <div class="ch-bar-track"><div class="ch-bar-fill" style="width:${pct}%"></div></div>
+      <div class="ch-bar-val">${v}</div>
+    </div>`;
+  }).join('');
+
+  // Active folder faders
+  const folderRows = folders
+    .filter(f => (channels[f.channel - 1] ?? 0) > 0)
+    .map(f => {
+      const v   = channels[f.channel - 1] ?? 0;
+      const pct = Math.round(v / 255 * 100);
+      return `<div class="ch-bar-row">
+        <div class="ch-bar-label">CH${f.channel}</div>
+        <div class="ch-bar-track"><div class="ch-bar-fill"
+          style="width:${pct}%;background:${v >= 128 ? 'var(--accent)' : 'var(--accent2)'}">
+        </div></div>
+        <div class="ch-bar-val">${esc(f.name)}</div>
+      </div>`;
+    }).join('');
+
+  el.innerHTML = fixedRows + (folderRows ? `
+    <div style="margin-top:8px;font-family:var(--mono);font-size:9px;color:var(--muted);
+         text-transform:uppercase;margin-bottom:4px">Active Folder Faders</div>
+    ${folderRows}` : '');
+}
+
+// ── Section toggle ─────────────────────────────────────────────────────────
+const collapsed = {};
+function toggleSection(id) {
+  collapsed[id] = !collapsed[id];
+  const body   = document.getElementById(id + '-body');
+  const toggle = document.getElementById('toggle-' + id);
+  if (body)   body.style.display   = collapsed[id] ? 'none' : '';
+  if (toggle) toggle.textContent   = collapsed[id] ? '▶' : '▼';
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+async function apiFetch(url, method = 'GET', body = null) {
+  const opts = { method, headers: {} };
+  if (body) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
+  const r = await fetch(url, opts);
+  return r.json();
+}
+
+// ── Start ──────────────────────────────────────────────────────────────────
+boot();
+</script>
+</body>
+</html>

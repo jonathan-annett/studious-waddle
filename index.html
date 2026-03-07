@@ -292,6 +292,14 @@ function initWs() {
       if (el) el.innerHTML = `<span style="color:var(--muted)">○</span> offline`;
     }
     if (msg.type === 'device-quarantined') loadQuarantined();
+    if (msg.type === 'sacn-temp-update')  loadTempFolderSummary();
+    if (msg.type === 'sacn-status') {
+      const macId = msg.mac.replace(/:/g, '');
+      const badge = document.getElementById(`am-dev-status-${macId}`);
+      if (badge && msg.showMode) {
+        badge.innerHTML = `<span style="color:var(--accent2)">◉ SHOW MODE</span>`;
+      }
+    }
   };
   ws.onclose = () => setTimeout(initWs, 2000);
 }
@@ -420,6 +428,7 @@ function toggleDeviceExpand(mac) {
   }
   contentEl.style.display = isExpanded ? 'none' : 'block';
   expandedDevice = isExpanded ? null : mac;
+  if (!isExpanded) amLoadTempCount(mac, macId);
 }
 
 // ─── api helpers ────────────────────────────────────────────────────────────
@@ -1905,9 +1914,198 @@ function renderAmDevices(body) {
               ${assignCtrl}
             </div>
             ${pushRow}
+            ${amBuildDmxSection(dev, macId)}
           </div>
         </div>`;
       }).join('')}`;
+}
+
+// ── DMX / sACN device section ──────────────────────────────────────────────
+
+function amBuildDmxSection(dev, macId) {
+  const universe    = dev.sacnUniverse;
+  const folders     = dev.sacnFolders ?? [];
+  const dashUrl     = universe ? `/dmx/${universe}` : null;
+  const folderRows  = folders.map(f => `
+    <tr>
+      <td style="font-family:var(--mono);font-size:10px;color:var(--accent2);padding:2px 6px 2px 0">
+        CH ${f.channel}</td>
+      <td style="font-size:11px;color:var(--text);padding:2px 6px 2px 0">${esc(f.name)}</td>
+      <td style="font-size:10px;color:var(--muted);padding:2px 0">${esc(f.folderPath)}</td>
+      <td style="padding:2px 0">
+        <button class="btn-secondary" style="font-size:9px;padding:1px 5px;color:var(--danger)"
+          onclick="amRemoveSacnFolder('${dev.mac}','${macId}',${f.channel})">×</button>
+      </td>
+    </tr>`).join('');
+
+  return `
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+      <div style="font-family:var(--mono);font-size:10px;color:var(--muted);
+           text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;
+           display:flex;align-items:center;gap:8px">
+        DMX / sACN
+        ${universe
+          ? `<span class="badge badge-blue">Universe ${universe}</span>
+             <a href="${dashUrl}" target="_blank"
+               style="font-size:10px;color:var(--accent2);text-decoration:none;margin-left:4px">
+               ↗ Dashboard</a>`
+          : ''}
+      </div>
+
+      <div class="form-row" style="align-items:flex-end;gap:8px;margin-bottom:8px">
+        <div class="form-group" style="flex:0 0 auto;min-width:120px">
+          <label style="font-size:10px">sACN Universe</label>
+          <input type="number" id="am-sacn-univ-${macId}" min="1" max="63999"
+            value="${universe ?? ''}" placeholder="e.g. 10"
+            style="font-size:11px;padding:3px 6px;width:100px">
+        </div>
+        <button class="btn-secondary" style="font-size:10px;padding:3px 10px"
+          onclick="amSaveSacnUniverse('${dev.mac}','${macId}')">Save</button>
+        ${universe
+          ? `<button class="btn-secondary" style="font-size:10px;padding:3px 8px;color:var(--danger)"
+               onclick="amClearSacnUniverse('${dev.mac}','${macId}')">Clear</button>` : ''}
+      </div>
+
+      ${folders.length ? `
+      <div style="margin-bottom:8px">
+        <table style="width:100%;border-collapse:collapse">
+          <tbody>${folderRows}</tbody>
+        </table>
+      </div>` : ''}
+
+      <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-bottom:4px">
+        <div class="form-group" style="flex:0 0 auto">
+          <label style="font-size:10px">CH (101–510)</label>
+          <input type="number" id="am-sacn-ch-${macId}" min="101" max="510"
+            placeholder="101" style="font-size:11px;padding:3px 6px;width:70px">
+        </div>
+        <div class="form-group" style="flex:1;min-width:120px">
+          <label style="font-size:10px">Folder name</label>
+          <input type="text" id="am-sacn-fname-${macId}" placeholder="Keynote Slides"
+            style="font-size:11px;padding:3px 6px">
+        </div>
+        <div class="form-group" style="flex:1;min-width:140px">
+          <label style="font-size:10px">Path on SD card</label>
+          <input type="text" id="am-sacn-fpath-${macId}" placeholder="/mnt/usb1/Keynote Slides"
+            style="font-size:11px;padding:3px 6px">
+        </div>
+        <button class="btn-secondary" style="font-size:10px;padding:3px 10px"
+          onclick="amAddSacnFolder('${dev.mac}','${macId}')">＋ Add</button>
+      </div>
+
+      <div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);
+           display:flex;align-items:center;gap:8px">
+        <span style="font-size:10px;color:var(--muted)" id="am-temp-count-${macId}">
+          Loading temp content…</span>
+        <button class="btn-secondary" style="font-size:10px;padding:2px 8px;color:var(--warn)"
+          onclick="amCleanupTempFolders('${dev.mac}','${macId}')">Clean Up</button>
+      </div>
+    </div>`;
+}
+
+async function amSaveSacnUniverse(mac, macId) {
+  const val = parseInt(document.getElementById(`am-sacn-univ-${macId}`)?.value);
+  if (!val || val < 1 || val > 63999) { alert('Enter a valid universe number (1–63999)'); return; }
+  try {
+    const r = await apiFetch(`/api/sacn/${mac}/universe`, 'POST', { universe: val });
+    if (r.error) throw new Error(r.error);
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amClearSacnUniverse(mac, macId) {
+  if (!confirm('Remove sACN universe assignment for this device?')) return;
+  try {
+    const r = await apiFetch(`/api/sacn/${mac}/universe`, 'DELETE');
+    if (r.error) throw new Error(r.error);
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amAddSacnFolder(mac, macId) {
+  const ch    = parseInt(document.getElementById(`am-sacn-ch-${macId}`)?.value);
+  const name  = document.getElementById(`am-sacn-fname-${macId}`)?.value.trim();
+  const fpath = document.getElementById(`am-sacn-fpath-${macId}`)?.value.trim();
+  if (!ch || ch < 101 || ch > 510) { alert('Channel must be 101–510'); return; }
+  if (!name)  { alert('Folder name is required'); return; }
+  if (!fpath) { alert('SD card path is required'); return; }
+  const reg   = amReg?.devices?.[mac] ?? {};
+  const existing = (reg.sacnFolders ?? []).filter(f => f.channel !== ch);
+  const updated  = [...existing, { channel: ch, name, folderPath: fpath }]
+    .sort((a, b) => a.channel - b.channel);
+  try {
+    const r = await apiFetch(`/api/sacn/${mac}/folders`, 'POST', { folders: updated });
+    if (r.error) throw new Error(r.error);
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amRemoveSacnFolder(mac, macId, channel) {
+  const reg     = amReg?.devices?.[mac] ?? {};
+  const updated = (reg.sacnFolders ?? []).filter(f => f.channel !== channel);
+  try {
+    const r = await apiFetch(`/api/sacn/${mac}/folders`, 'POST', { folders: updated });
+    if (r.error) throw new Error(r.error);
+    await loadAssetManager();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amCleanupTempFolders(mac, macId) {
+  const countEl = document.getElementById(`am-temp-count-${macId}`);
+  if (!confirm('Delete all temporary (_show_) folders from this TV\'s SD card?')) return;
+  try {
+    const r = await apiFetch(`/api/dmx/${mac}/temp-folders`, 'DELETE');
+    if (r.error) throw new Error(r.error);
+    if (countEl) countEl.textContent = '0 temp folders on player';
+    loadTempFolderSummary();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function amLoadTempCount(mac, macId) {
+  const countEl = document.getElementById(`am-temp-count-${macId}`);
+  if (!countEl) return;
+  try {
+    const r = await apiFetch(`/api/dmx/${mac}/temp-folders`, 'GET');
+    const n = r.folders?.length ?? 0;
+    countEl.textContent = n === 0
+      ? '0 temp folders on player'
+      : `${n} temp folder${n === 1 ? '' : 's'} on player`;
+    countEl.style.color = n > 0 ? 'var(--warn)' : 'var(--muted)';
+  } catch { countEl.textContent = 'temp folder status unavailable'; }
+}
+
+// System-wide temp folder summary card
+async function loadTempFolderSummary() {
+  const card = document.getElementById('card-temp-summary');
+  if (!card) return;
+  try {
+    const r = await apiFetch('/api/dmx/temp-folders', 'GET');
+    if (!r.devices?.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    card.innerHTML = `
+      <div class="card-header"><h2>Temporary Content on Players</h2></div>
+      <div class="card-body" style="padding:10px">
+        ${r.devices.map(d => `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;
+               font-size:11px;flex-wrap:wrap">
+            <span style="color:var(--text);min-width:120px">${esc(d.name)}</span>
+            <span style="color:var(--warn)">
+              ⚡ ${d.folders.length} folder${d.folders.length === 1 ? '' : 's'}:
+              ${d.folders.map(f => esc(f.displayName)).join(', ')}
+            </span>
+            <button class="btn-secondary" style="font-size:10px;padding:1px 8px;color:var(--warn)"
+              onclick="amCleanupTempFolders('${d.mac}','${d.mac.replace(/:/g,'')}')">Clean</button>
+          </div>`).join('')}
+      </div>`;
+  } catch { card.style.display = 'none'; }
+}
+
+// Generic fetch helper (supplements existing api() which uses POST)
+async function apiFetch(url, method = 'GET', body = null) {
+  const opts = { method, headers: {} };
+  if (body) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
+  const r = await fetch(url, opts);
+  return r.json();
 }
 
 function amFillFromSession() {
@@ -2440,8 +2638,15 @@ document.addEventListener('DOMContentLoaded', () => {
   quarDiv.id = 'card-quarantined';
   quarDiv.style.display = 'none';
   document.getElementById('scanner-wrap').appendChild(quarDiv);
+  // Temporary content summary card (hidden when no temp folders exist)
+  const tempDiv = document.createElement('div');
+  tempDiv.className = 'card';
+  tempDiv.id = 'card-temp-summary';
+  tempDiv.style.display = 'none';
+  document.getElementById('scanner-wrap').appendChild(tempDiv);
   loadAssetManager();
   loadQuarantined();
+  loadTempFolderSummary();
 });
 
 document.addEventListener('keydown', e => {
