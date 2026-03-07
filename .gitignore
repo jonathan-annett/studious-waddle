@@ -1,2 +1,4 @@
 cache/
 .pin
+node_modules
+streamdeck-gateway/node_modules
