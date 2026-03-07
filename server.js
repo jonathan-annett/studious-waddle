@@ -3680,42 +3680,54 @@ async function sacnHandleFolders(mac, dmx) {
   if (!device) return;
   const folders = reg.devices[mac].sacnFolders ?? [];
 
-  // Collect active faders (≥ threshold) in the folder channel range
-  const active = [];
-  for (let i = 0; i < SACN_FOLDER_COUNT; i++) {
-    const chIdx = SACN_FOLDER_CH_START + i; // 0-based index into dmx array
-    if (chIdx >= 512) break;
-    const val = dmx[chIdx] ?? 0;
-    if (val >= SACN_ACTIVE_THRESHOLD) {
-      const ch      = chIdx + 1; // 1-based channel number
-      const folderCfg = folders.find(f => f.channel === ch);
-      if (folderCfg) active.push(folderCfg);
+  // Build bitmap of active folder faders (same as dashboard does)
+  let bitmap = 0;
+  for (let j = 0; j < folders.length; j++) {
+    const chIdx = folders[j].channel - 1; // 0-based
+    if (chIdx >= 0 && chIdx < 512 && (dmx[chIdx] ?? 0) >= SACN_ACTIVE_THRESHOLD) {
+      bitmap |= (1 << j);
     }
   }
 
-  if (active.length > 1) {
-    // Crossfade window — hold, do nothing
-    return;
-  }
+  const bitCount = bitmap.toString(2).split('1').length - 1; // count set bits
+  log('debug', `[sACN] folder bitmap: ${bitmap.toString(2).padStart(folders.length || 1, '0')} (${bitCount} active)`);
 
-  if (active.length === 0) {
-    // All faders off — stop playback, switch to CH3 input
+  // Handle playback based on bitmap state
+  if (bitmap === 0) {
+    // All faders off — stop playback
+    log('debug', `[sACN] all folder faders down → stop`);
     await sacnStopPlayback(mac, dmx[2] ?? 0);
     return;
   }
 
-  // Exactly one active folder
-  const folder = active[0];
-  if (device.autoplay === folder.name) return; // already playing
+  if ((bitmap & (bitmap - 1)) === 0) {
+    // Exactly one bit set — single folder active
+    const activeIdx = Math.log2(bitmap);
+    const folder = folders[activeIdx];
+    if (!folder) return;
 
-  log('info', `[sACN] ${mac} → folder "${folder.name}" (ch ${folder.channel})`);
-  try {
-    await playFolder(device.tvIp, folder.name, null, 1);
-    reg.devices[mac].autoplay = folder.name;
-    saveRegistry(reg);
-  } catch (e) {
-    log('warn', `[sACN] playFolder failed for ${mac}: ${e.message}`);
+    if (device.autoplay === folder.name) {
+      log('debug', `[sACN] folder "${folder.name}" already playing`);
+      return;
+    }
+
+    log('info', `[sACN] ${mac} → folder "${folder.name}" (ch ${folder.channel})`);
+    try {
+      await playFolder(device.tvIp, folder.name, null, 1);
+      reg.devices[mac].autoplay = folder.name;
+      saveRegistry(reg);
+    } catch (e) {
+      log('warn', `[sACN] playFolder failed for ${mac}: ${e.message}`);
+    }
+    return;
   }
+
+  // 2+ bits set — crossfade hold
+  const activeNames = [];
+  for (let j = 0; j < folders.length; j++) {
+    if (bitmap & (1 << j)) activeNames.push(folders[j].name);
+  }
+  log('debug', `[sACN] ${bitCount} folders active (hold): ${activeNames.join(' + ')}`);
 }
 
 /** Stop media player and switch TV to the input specified by CH3 value. */
@@ -3748,11 +3760,12 @@ async function sacnStopPlayback(mac, inputChannelValue) {
 function sacnReceive(mac, incomingDmx) {
   if (!sacnState.has(mac)) {
     sacnState.set(mac, {
-      dmx:      new Uint8Array(512),
-      lastPacket: 0,
-      showMode: false,
-      timers:   {},
-      lastSent: {},
+      dmx:           new Uint8Array(512),
+      lastPacket:    0,
+      showMode:      false,
+      timers:        {},
+      lastSent:      {},
+      lastFolderBmp: 0,  // bitmap of previous active folder states
     });
   }
   const st = sacnState.get(mac);
@@ -3771,9 +3784,20 @@ function sacnReceive(mac, incomingDmx) {
   // CH2–9 (indices 1–8)
   for (let i = 1; i <= 8; i++) { if (newDmx[i] !== oldDmx[i]) { vcpChanged = true; break; } }
 
-  // CH101–510 (indices 100–509)
-  for (let i = SACN_FOLDER_CH_START; i < SACN_FOLDER_CH_START + SACN_FOLDER_COUNT && i < 512; i++) {
-    if (newDmx[i] !== oldDmx[i]) { folderChanged = true; break; }
+  // CH101–510: Use bitmap to detect state changes (not byte-by-byte)
+  // Only care if a fader crossed the 128 threshold, not if value changed within same state
+  let newFolderBmp = 0;
+  const reg = loadRegistry();
+  const folders = reg.devices?.[mac]?.sacnFolders ?? [];
+  for (let j = 0; j < folders.length; j++) {
+    const chIdx = folders[j].channel - 1; // 0-based
+    if (chIdx >= 0 && chIdx < 512 && (newDmx[chIdx] ?? 0) >= SACN_ACTIVE_THRESHOLD) {
+      newFolderBmp |= (1 << j);
+    }
+  }
+  if (newFolderBmp !== st.lastFolderBmp) {
+    folderChanged = true;
+    st.lastFolderBmp = newFolderBmp;
   }
 
   // Store snapshot
