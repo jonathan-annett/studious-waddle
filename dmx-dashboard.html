@@ -209,13 +209,21 @@ body.console-mode #blackout-btn { pointer-events: none; opacity: .5; }
 /* ── Level sliders ── */
 #levels-body { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 20px; }
 @media (max-width: 500px) { #levels-body { grid-template-columns: 1fr; } }
-.level-row { display: flex; flex-direction: column; gap: 4px; }
-.level-label { font-size: 10px; color: var(--muted); font-family: var(--mono); display: flex; justify-content: space-between; }
+.level-row { display: flex; flex-direction: row; gap: 6px; align-items: center; }
+.level-label { font-size: 10px; color: var(--muted); font-family: var(--mono); flex-shrink: 0; }
 .level-val { color: var(--accent2); }
 input[type=range] {
-  width: 100%; accent-color: var(--accent2); cursor: pointer;
+  flex: 1; accent-color: var(--accent2); cursor: pointer;
 }
 body.console-mode input[type=range] { cursor: default; }
+.lock-btn {
+  flex-shrink: 0; font-size: 12px; padding: 2px 6px; background: transparent;
+  border: 1px solid var(--border); color: var(--muted);
+  border-radius: 3px; cursor: pointer; transition: all 0.2s;
+}
+.lock-btn:hover { border-color: var(--warn); color: var(--warn); }
+.lock-btn.locked { background: rgba(255,149,0,.1); border-color: var(--warn); color: var(--warn); }
+.lock-btn.locked:hover { background: rgba(255,149,0,.2); }
 
 /* ── Console monitor ── */
 #console-body { display: none; }
@@ -326,32 +334,42 @@ body.console-mode #console-body { display: block; }
     <div class="level-row">
       <div class="level-label">Brightness <span class="level-val" id="lv-brightness">—</span></div>
       <input type="range" min="0" max="100" value="0" class="ctrl"
-        id="sl-brightness" oninput="onSlider('brightness',this.value)"
+        id="sl-brightness" data-vcp-name="brightness" data-opcode="0x10"
+        oninput="onSlider('brightness',this.value)"
         onchange="doVcp(0x00,0x10,this.value)">
+      <button class="lock-btn" id="lock-brightness" onclick="toggleLock('brightness')" title="Lock: prevent console from changing">🔓</button>
     </div>
     <div class="level-row">
       <div class="level-label">Contrast <span class="level-val" id="lv-contrast">—</span></div>
       <input type="range" min="0" max="100" value="0" class="ctrl"
-        id="sl-contrast" oninput="onSlider('contrast',this.value)"
+        id="sl-contrast" data-vcp-name="contrast" data-opcode="0x12"
+        oninput="onSlider('contrast',this.value)"
         onchange="doVcp(0x00,0x12,this.value)">
+      <button class="lock-btn" id="lock-contrast" onclick="toggleLock('contrast')" title="Lock: prevent console from changing">🔓</button>
     </div>
     <div class="level-row">
       <div class="level-label">Backlight <span class="level-val" id="lv-backlight">—</span></div>
       <input type="range" min="0" max="100" value="0" class="ctrl"
-        id="sl-backlight" oninput="onSlider('backlight',this.value)"
+        id="sl-backlight" data-vcp-name="backlight" data-opcode="0x13"
+        oninput="onSlider('backlight',this.value)"
         onchange="doVcp(0x00,0x13,this.value)">
+      <button class="lock-btn" id="lock-backlight" onclick="toggleLock('backlight')" title="Lock: prevent console from changing">🔓</button>
     </div>
     <div class="level-row">
       <div class="level-label">Sharpness <span class="level-val" id="lv-sharpness">—</span></div>
       <input type="range" min="0" max="100" value="0" class="ctrl"
-        id="sl-sharpness" oninput="onSlider('sharpness',this.value)"
+        id="sl-sharpness" data-vcp-name="sharpness" data-opcode="0x87"
+        oninput="onSlider('sharpness',this.value)"
         onchange="doVcp(0x00,0x87,this.value)">
+      <button class="lock-btn" id="lock-sharpness" onclick="toggleLock('sharpness')" title="Lock: prevent console from changing">🔓</button>
     </div>
     <div class="level-row">
       <div class="level-label">Volume <span class="level-val" id="lv-volume">—</span></div>
       <input type="range" min="0" max="100" value="0" class="ctrl"
-        id="sl-volume" oninput="onSlider('volume',this.value)"
+        id="sl-volume" data-vcp-name="volume" data-opcode="0x62"
+        oninput="onSlider('volume',this.value)"
         onchange="doVcp(0x00,0x62,this.value)">
+      <button class="lock-btn" id="lock-volume" onclick="toggleLock('volume')" title="Lock: prevent console from changing">🔓</button>
     </div>
   </div>
 
@@ -384,6 +402,19 @@ let currentChannels = new Array(512).fill(0);
 let currentInput    = null; // last known input VCP code
 let currentPlaying  = null; // last known folder name
 const INPUT_NAMES   = { 0x11:'HDMI1', 0x12:'HDMI2', 0x0F:'DP1', 0x10:'DP2', 0x87:'Media Player' };
+
+// VCP state tracking
+let vcpMaxValues = {};    // { brightness: 255, contrast: 255, ... }
+let vcpInitialValues = {}; // { brightness: 128, contrast: 100, ... } — captured on load
+let vcpLockedState = {};  // { brightness: false, contrast: true, ... }
+const VCP_CONTROLS = {
+  brightness: { opCode: 0x10, name: 'brightness' },
+  contrast:   { opCode: 0x12, name: 'contrast' },
+  backlight:  { opCode: 0x13, name: 'backlight' },
+  sharpness:  { opCode: 0x87, name: 'sharpness' },
+  volume:     { opCode: 0x62, name: 'volume' },
+};
+for (const name in VCP_CONTROLS) vcpLockedState[name] = false;
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 async function boot() {
@@ -434,6 +465,22 @@ function showError(msg) {
 
 async function cleanup() {
   if (vcpPollHandle) clearInterval(vcpPollHandle);
+  // Restore initial VCP values before closing
+  if (sessionId) {
+    for (const [name, initialValue] of Object.entries(vcpInitialValues)) {
+      const ctrl = VCP_CONTROLS[name];
+      if (ctrl && sessionId) {
+        try {
+          const scaled = Math.round((initialValue / 100) * (vcpMaxValues[name] || 255));
+          await fetch('/api/vcp/set', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId, opPage: 0x00, opCode: ctrl.opCode, value: scaled }),
+          }).catch(() => {});
+        } catch {}
+      }
+    }
+  }
   if (sessionId) {
     try { fetch(`/api/connect/${sessionId}`, { method: 'DELETE', keepalive: true }); }
     catch {}
@@ -494,18 +541,25 @@ function onSacnUpdate(channels) {
   // Update folder active states
   updateFolderActiveStates(channels);
 
-  // Mirror VCP sliders in console mode
-  const vals = [
-    { id:'sl-brightness', lv:'lv-brightness', idx:3, scale:100/255 },
-    { id:'sl-contrast',   lv:'lv-contrast',   idx:4, scale:100/255 },
-    { id:'sl-backlight',  lv:'lv-backlight',  idx:5, scale:100/255 },
-    { id:'sl-sharpness',  lv:'lv-sharpness',  idx:6, scale:100/255 },
-    { id:'sl-volume',     lv:'lv-volume',      idx:7, scale:100/255 },
+  // Mirror VCP sliders in console mode (respecting locks)
+  const vcp_map = [
+    { name:'brightness', idx:3, id:'sl-brightness', lv:'lv-brightness' },
+    { name:'contrast',   idx:4, id:'sl-contrast',   lv:'lv-contrast' },
+    { name:'backlight',  idx:5, id:'sl-backlight',  lv:'lv-backlight' },
+    { name:'sharpness',  idx:6, id:'sl-sharpness',  lv:'lv-sharpness' },
+    { name:'volume',     idx:7, id:'sl-volume',     lv:'lv-volume' },
   ];
-  for (const v of vals) {
-    const pct = Math.round((channels[v.idx] ?? 0) * v.scale);
-    const sl  = document.getElementById(v.id);
-    const lv  = document.getElementById(v.lv);
+  for (const v of vcp_map) {
+    // Skip if this control is locked
+    if (vcpLockedState[v.name]) continue;
+
+    const dmxValue = channels[v.idx] ?? 0;
+    const max = vcpMaxValues[v.name] || 255;
+    const actual = Math.round((dmxValue / 255) * max);
+    const pct = Math.round((actual / max) * 100);
+
+    const sl = document.getElementById(v.id);
+    const lv = document.getElementById(v.lv);
     if (sl) sl.value = pct;
     if (lv) lv.textContent = pct + '%';
   }
@@ -513,6 +567,15 @@ function onSacnUpdate(channels) {
 
 function takeManualControl() {
   setConsoleMode(false);
+}
+
+function toggleLock(controlName) {
+  vcpLockedState[controlName] = !vcpLockedState[controlName];
+  const btn = document.getElementById(`lock-${controlName}`);
+  if (btn) {
+    btn.classList.toggle('locked', vcpLockedState[controlName]);
+    btn.textContent = vcpLockedState[controlName] ? '🔒' : '🔓';
+  }
 }
 
 // ── Folder management ──────────────────────────────────────────────────────
@@ -663,17 +726,28 @@ async function loadVcpState() {
       brightness:  { id: 'sl-brightness', lv: 'lv-brightness' },
       contrast:    { id: 'sl-contrast',   lv: 'lv-contrast' },
       sharpness:   { id: 'sl-sharpness',  lv: 'lv-sharpness' },
-      colorTemp:   { id: 'sl-colortemp',  lv: 'lv-colortemp' },
       volume:      { id: 'sl-volume',     lv: 'lv-volume' },
     };
 
     // Interrogate returns vcp as an object: { brightness: {current, max, ...}, ... }
     const vcp = r.vcp ?? {};
+    const isInitialLoad = Object.keys(vcpInitialValues).length === 0;
+
     for (const [vcpName, info] of Object.entries(vcpNameMap)) {
       const vcpEntry = vcp[vcpName];
       if (vcpEntry && !vcpEntry.error && vcpEntry.current !== undefined) {
         const current = vcpEntry.current || 0;
         const max = vcpEntry.max || 255;
+
+        // Store max value for later scaling
+        vcpMaxValues[vcpName] = max;
+
+        // On initial load, capture the starting values (for restoration later)
+        if (isInitialLoad) {
+          vcpInitialValues[vcpName] = Math.round((current / max) * 100);
+        }
+
+        // Display as percentage (0-100)
         const pct = Math.round((current / max) * 100);
         const sl = document.getElementById(info.id);
         const lv = document.getElementById(info.lv);
@@ -815,7 +889,19 @@ function onSlider(name, value) {
 
 async function doVcp(page, code, value) {
   if (!sessionId || consoleMode) return;
-  try { await apiFetch('/api/vcp/set', 'POST', { sessionId, opPage: page, opCode: code, value: parseInt(value) }); }
+  try {
+    // Find which VCP control this is and scale properly
+    let scaledValue = parseInt(value);
+    for (const [name, ctrl] of Object.entries(VCP_CONTROLS)) {
+      if (ctrl.opCode === code) {
+        const pct = parseInt(value);
+        const max = vcpMaxValues[name] || 255;
+        scaledValue = Math.round((pct / 100) * max);
+        break;
+      }
+    }
+    await apiFetch('/api/vcp/set', 'POST', { sessionId, opPage: page, opCode: code, value: scaledValue });
+  }
   catch {}
 }
 
