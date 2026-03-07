@@ -471,3 +471,206 @@ git pull && chmod +x run
 # 3. Use Media Player card to switch folders
 # 4. Use Emergency Contents card for emergency mode testing
 ```
+
+---
+
+## Stream Deck Gateway
+
+A companion subsystem (in `streamdeck-gateway/`) that bridges Elgato Stream Deck hardware to
+the NEC monitor control system. Runs on the operator's local machine (e.g. i7 workstation),
+**not** on the OpenWrt router.
+
+### Architecture
+
+```
+[Physical USB Deck]          [Browser WebHID Deck]
+       ↓                              ↓
+  index.js (Node)          public/remote.js (browser)
+  USB → sharp → WS          WebHID → Canvas → WS
+         ↘                        ↙
+          Brain WebSocket Server  ←→  server.js NEC API
+                  :4001
+```
+
+Two client types connect to the same brain server over WebSocket:
+
+| Client | File | HID Access | Image Rendering |
+|--------|------|-----------|----------------|
+| **USB Gateway** | `index.js` | `@elgato-stream-deck/node` | `sharp` (native) |
+| **Browser Satellite** | `public/remote.js` | WebHID API | `OffscreenCanvas` |
+
+Both implement identical protocol behaviour. `index.js` runs as a persistent Node process;
+`remote.js` is served to any browser and uses the WebHID permission prompt to claim the device.
+
+The brain server logic is currently in `test-server.js` (demo/reference only). For production,
+this logic will be integrated into `server.js` as a WebSocket endpoint on port 4001.
+
+### Running the Gateway (dev machine)
+
+```bash
+cd streamdeck-gateway
+node index.js          # USB gateway — connects to brain at ws://localhost:4001
+node test-server.js    # Reference brain server — port 4001, serves satellite page
+```
+
+The satellite page is served at `http://localhost:4001` — open in Chrome, click
+"Connect Stream Deck", grant WebHID permission.
+
+### Authentication / Whitelist
+
+- `whitelist.json` — array of authorised serial number strings
+- **Local connections** (127.0.0.1 / ::1): serial auto-added on first `device_online`
+- **Remote connections**: serial must already be in `whitelist.json` — rejected with
+  `auth_failed` otherwise
+- Connect a deck locally once to register it, then it can connect remotely
+
+---
+
+### WebSocket Protocol
+
+All messages are JSON `{ event, data }`. The brain runs the WebSocket server; gateways/
+satellites are clients.
+
+#### Device → Brain
+
+```
+device_online   Sent immediately after WS open.
+                data: { model, serial, rows, cols, iconSize, keys? }
+                  model    — e.g. "Stream Deck XL"
+                  serial   — hardware serial number (used for auth)
+                  rows     — button grid rows
+                  cols     — button grid columns
+                  iconSize — button pixel size (square)
+                  keys     — total button count (optional, cols×rows if absent)
+
+key_event       Sent on every button press and release.
+                data: { index, state, serial }
+                  index  — 0-based key index (left-to-right, top-to-bottom)
+                  state  — "down" | "up"
+                  serial — identifies which deck (for multi-deck setups)
+```
+
+#### Brain → Device
+
+```
+set_key         Fill a single button with an image.
+                data: { index, image, pressImage? }
+                  index       — 0-based key index
+                  image       — base64-encoded PNG
+                  pressImage  — base64 PNG for pressed state (optional)
+                                false = locked (no visual feedback on press)
+                                omit  = default white flash on press
+
+set_zone_fast   Fill a rectangular group of buttons with slices of one image.
+                Efficient for multi-key thumbnails or sidebar layouts.
+                data: { image, indices, cols, rows, position?, background? }
+                  image      — base64 PNG — the source image to slice
+                  indices    — ordered array of deck key indices to fill
+                               (must be cols×rows in length, row-major order)
+                  cols       — grid width of the zone in keys
+                  rows       — grid height of the zone in keys
+                  position   — sharp/canvas position string (default "right top")
+                               "center" | "right top" | "left top" | etc.
+                  background — { r, g, b } fill colour for letterbox (default black)
+                Example — 4×4 sidebar zone on XL (left 4 cols):
+                  indices: [0,1,2,3, 8,9,10,11, 16,17,18,19, 24,25,26,27]
+                  cols: 4, rows: 4
+
+set_splash      Cover the ENTIRE panel with one image. Used to announce a state
+                change (e.g. "OFFLINE", "LOCKED", countdown) or draw attention.
+                The current panel content is saved and restored on clear.
+                Key events still fire during a splash so the brain can react
+                (e.g. any key press dismisses). No visual press feedback is shown.
+                data: { image, duration?, background? }
+                  image      — base64 PNG — displayed fit-contain centred
+                  duration   — seconds before auto-dismiss (omit = until clear_splash)
+                  background — { r, g, b } letterbox fill (default black)
+
+clear_splash    Dismiss the active splash and restore the previous panel state.
+                data: {}
+                Note: also fires automatically when duration elapses.
+
+clear_all       Clear the entire panel and reset all key state.
+                data: {}
+```
+
+#### Brain → Device (auth only)
+
+```
+auth_failed     Remote device rejected — serial not in whitelist.
+                data: { reason }
+                The brain closes the connection immediately after sending this.
+```
+
+---
+
+### Splash Feature — Design Notes
+
+**State machine per device:**
+- `splashActive: bool` — whether a splash is currently shown
+- `preSplashCache` — snapshot of `keyCache` taken when splash activates
+- `splashTimer` — handle for the auto-dismiss timeout
+
+**On `set_splash`:**
+1. Cancel any existing splash timer
+2. Snapshot `keyCache` → `preSplashCache`
+3. Render the image fit-contain centred across all `rows×cols` keys
+4. Cache each sliced key with `pressed: false` (locked — no press feedback)
+5. If `duration` given, set timer to call `clearSplash()` after that many seconds
+
+**On `clear_splash` / timer expiry:**
+1. Restore `keyCache` from `preSplashCache`
+2. Re-render all restored keys to hardware (single `fillPanelCanvas` call in browser;
+   parallel `fillKeyBuffer` calls in Node)
+3. Clear `preSplashCache`
+
+**During a splash**, `set_key` and `set_zone_fast` updates go to `preSplashCache` rather than
+to the hardware. This means the brain can stage the next panel state while a splash is showing
+and it will appear correctly when the splash clears.
+
+**`clear_all`** resets splash state completely — no restore.
+
+---
+
+### Integration with server.js
+
+The brain's `key_event` handler maps deck button presses to NEC API calls:
+
+```javascript
+// Skeleton — expand as UI is built out
+if (event === 'key_event' && data.state === 'up') {
+    const { index, serial } = data;
+    // Example: key 0 → switch to MP input on the device linked to this deck
+    if (index === 0) {
+        http.request({ host: '192.168.100.1', port: 4000, path: '/api/vcp/set', method: 'POST' }, ...);
+    }
+}
+```
+
+The brain server will receive the device's `serial` on `device_online` and can look up which
+NEC TV is paired to that deck (store a `serial → tvIP` mapping alongside the whitelist).
+
+### File Structure
+
+```
+streamdeck-gateway/
+  index.js              USB gateway — polls USB every 2s, thin client to brain
+  remote.js             (legacy stub — superseded by public/remote.js)
+  test-server.js        Reference brain server — demo only, not for production
+  public/
+    index.html          Satellite web page — served by brain, opened in Chrome
+    remote.js           StreamDeckRemote class — WebHID satellite client
+  dist/                 Webpack output — copy of public/ + bundled vendor JS
+    index.html
+    remote.js
+    streamdeck-vendor.js  @elgato-stream-deck/webhid bundled for browser use
+  src/
+    vendor.js           Webpack entry — re-exports @elgato-stream-deck/webhid
+  webpack.config.cjs    Bundles src/vendor.js → dist/streamdeck-vendor.js,
+                        copies public/ → dist/
+  whitelist.json        Authorised serial numbers (auto-managed)
+  package.json          npm deps: @elgato-stream-deck/node, sharp, ws, express
+```
+
+**Note:** `dist/remote.js` is a plain copy of `public/remote.js` (webpack does not process it).
+When editing `public/remote.js`, also copy to `dist/remote.js` or run `npm run build`.
