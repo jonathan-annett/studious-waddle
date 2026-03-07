@@ -706,27 +706,30 @@ async function sdShowPreview(socket, mac) {
   });
 }
 
-/** Toggle power for a TV by MAC. Opens a temporary NEC session. */
+/** Toggle power for a TV by MAC. Opens a temporary NEC session.
+ *  Uses the cached sdDeviceState for current power instead of re-probing
+ *  (the NEC firmware returns garbled powerStatus during transitions). */
 async function sdTogglePower(mac) {
   const reg = loadRegistry();
   const device = reg.devices?.[mac];
   if (!device?.tvIp) return;
+
+  // Use cached state from last device-online probe — avoids flaky re-probe
+  const cached = sdDeviceState.get(mac);
+  const currentPower = cached?.power ?? 'unknown';
+  const newState = currentPower === 'on' ? 'off' : 'on';
+
   let sess;
   try {
     sess = await Promise.race([
       openTcpSession(device.tvIp, { port: 7142 }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('sd-power-timeout')), 6000)),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('sd-power-timeout')), 8000)),
     ]);
-    const pw = await Promise.race([
-      sess.powerStatus(1),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('sd-power-timeout')), 3000)),
-    ]);
-    const newState = pw.modeStr === 'on' ? 'off' : 'on';
     await Promise.race([
       sess.powerSet(1, newState),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('sd-power-timeout')), 3000)),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('sd-power-timeout')), 5000)),
     ]);
-    log('info', `[streamdeck] Power toggled for ${device.name || mac}: ${pw.modeStr} → ${newState}`);
+    log('info', `[streamdeck] Power toggled for ${device.name || mac}: ${currentPower} → ${newState}`);
     sdDeviceState.set(mac, { online: true, power: newState });
     sdUpdateButton(mac);
     wsBroadcast({ type: 'device-online', category: 'tv', mac, name: device.name, ip: device.tvIp, power: newState });
