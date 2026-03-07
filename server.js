@@ -3584,9 +3584,25 @@ function joinUniverse(universe) {
     return;
   }
   try {
-    sacnSocket.sock.addMembership(addr);
+    // Find the local LAN interface (non-loopback IPv4)
+    let localIp = null;
+    const ifaces = os.networkInterfaces();
+    for (const [ifname, addrs] of Object.entries(ifaces)) {
+      const ipv4 = addrs.find(a => a.family === 'IPv4' && !a.internal);
+      if (ipv4) {
+        localIp = ipv4.address;
+        log('debug', `[sACN] found local interface ${ifname}: ${localIp}`);
+        break;
+      }
+    }
+    if (localIp) {
+      sacnSocket.sock.addMembership(addr, localIp);
+      log('info', `[sACN] joined multicast ${addr} (universe ${universe}) on interface ${localIp}`);
+    } else {
+      sacnSocket.sock.addMembership(addr);
+      log('info', `[sACN] joined multicast ${addr} (universe ${universe}) (no local interface found)`);
+    }
     sacnSocket.joined.add(addr);
-    log('info', `[sACN] joined multicast ${addr} (universe ${universe})`);
   } catch (e) {
     log('warn', `[sACN] addMembership ${addr} failed: ${e.message}`);
   }
