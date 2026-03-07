@@ -80,9 +80,6 @@ console.log(`[startup] Registry file exists: ${fs.existsSync(REGISTRY_FILE) ? 'y
 function loadRegistry() {
   try {
     const data = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8'));
-    const deviceCount = Object.keys(data.devices || {}).length;
-    const groupCount = Object.keys(data.groups || {}).length;
-    console.log(`[registry] Loaded from ${REGISTRY_FILE} — ${deviceCount} device(s), ${groupCount} group(s)`);
     return data;
   } catch (e) {
     console.log(`[registry] Could not load ${REGISTRY_FILE} — initializing empty: ${e.message}`);
@@ -3991,6 +3988,12 @@ function readRawBody(req) {
 
 server.listen(PORT, () => {
   console.log(`\n  NEC Monitor Control Console  →  http://localhost:${PORT}\n`);
+
+  // Log registry summary on startup
+  const reg = loadRegistry();
+  const deviceCount = Object.keys(reg.devices || {}).length;
+  const groupCount = Object.keys(reg.groups || {}).length;
+  console.log(`[registry] Loaded — ${deviceCount} device(s), ${groupCount} group(s)`);
 
   // Start the sACN / E1.31 UDP listener
   startSacnListener();
