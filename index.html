@@ -433,7 +433,7 @@ function toggleDeviceExpand(mac) {
 
 // ─── api helpers ────────────────────────────────────────────────────────────
 
-async function api(path, body, method) {
+async function api_connect(path, body, method) {
   if (!method || method === 'POST' || method === 'PUT') {
     const r = await fetch('/api' + path, {
       method: method || 'POST',
@@ -449,6 +449,17 @@ async function api(path, body, method) {
   const json = await r.json();
   if (json.error) throw Object.assign(new Error(json.error), json);
   return json;
+}
+
+async function api_connect(path, body, method) {
+  try {
+    return await  api_connect(path, body, method) ;
+  } catch (e) {
+    if (e.error === 'session not found') {
+        await connect() ;
+        return  await  api(path, body, method) ; 
+    }
+  }
 }
 
 // ─── connect / disconnect ───────────────────────────────────────────────────
@@ -656,7 +667,7 @@ async function refreshImageControls() {
   for (const name of names) {
     try {
       const [pg, oc] = codes[name];
-      const r = await api('/vcp/get', { opPage: pg, opCode: oc });
+      const r = await api_connect('/vcp/get', { opPage: pg, opCode: oc });
       const rangeEl = document.getElementById('range-' + name);
       const valEl   = document.getElementById('val-'   + name);
       if (rangeEl) { rangeEl.value = r.current; rangeEl.max = r.max; }
@@ -667,7 +678,7 @@ async function refreshImageControls() {
 
 async function setVcp(opPage, opCode, value, valId) {
   try {
-    await api('/vcp/set', { opPage, opCode, value, persist: false });
+    await api_connect('/vcp/set', { opPage, opCode, value, persist: false });
     if (valId) document.getElementById(valId).textContent = value;
   } catch(e) {
     alert('VCP set failed: ' + e.message);
@@ -682,7 +693,7 @@ async function loadDefaultSettings() {
 
   try {
     // Get defaults from registry
-    const response = await api('/defaults',null,'GET');
+    const response = await api_connect('/defaults',null,'GET');
     const defaults = response.defaults || {};
 
     // List of all VCP controls with their codes
@@ -702,7 +713,7 @@ async function loadDefaultSettings() {
       if (controls[name]) {
         const [page, code] = controls[name];
         try {
-          await api('/vcp/set', { opPage: page, opCode: code, value: value, persist: false });
+          await api_connect('/vcp/set', { opPage: page, opCode: code, value: value, persist: false });
 
           // Update UI elements
           const rangeEl = document.getElementById('range-' + name);
@@ -751,7 +762,7 @@ async function saveDefaultSettings() {
     for (const name of names) {
       try {
         const [pg, oc] = codes[name];
-        const r = await api('/vcp/get', { opPage: pg, opCode: oc });
+        const r = await api_connect('/vcp/get', { opPage: pg, opCode: oc });
         settings[name] = r.current;
       } catch(e) {
         console.warn(`Failed to read ${name}: ${e.message}`);
@@ -765,7 +776,7 @@ async function saveDefaultSettings() {
 
     // Save to registry
     statusEl.innerHTML = '<span style="color:var(--accent)">⟳ Saving defaults...</span>';
-    const response = await api('/defaults', {settings}, 'POST');
+    const response = await api_connect('/defaults', {settings}, 'POST');
 
     const savedCount = Object.keys(settings).length;
     statusEl.innerHTML = `<span class="ok-text">✓</span> Saved ${savedCount} default setting(s): ${Object.keys(settings).join(', ')}`;
@@ -792,7 +803,7 @@ function renderPower(power) {
 
 async function refreshPower() {
   try {
-    const r = await api('/power/status');
+    const r = await api_connect('/power/status');
     const modeBadge = {on:'badge-green', standby:'badge-yellow', suspend:'badge-yellow', off:'badge-red'};
     const el = document.getElementById('power-badge');
     if (el) { el.className = 'badge ' + (modeBadge[r.modeStr] || 'badge-grey'); el.textContent = r.modeStr; }
@@ -803,7 +814,7 @@ async function refreshPower() {
 async function setPower(state) {
   if (!confirm('Set power ' + state + '? (15s cooldown will apply)')) return;
   try {
-    await api('/power/set', { state });
+    await api_connect('/power/set', { state });
     setTimeout(refreshPower, 2000);
   } catch(e) { alert(e.message); }
 }
@@ -910,10 +921,10 @@ async function vcpSetFromSlider() {
   statusEl.innerHTML = `<span style="color:var(--accent)">⟳ Setting 0x${opPage.toString(16).toUpperCase().padStart(2,'0')} / 0x${opCode.toString(16).toUpperCase().padStart(2,'0')} = ${actualValue}...</span>`;
 
   try {
-    const r = await api('/vcp/set', { opPage, opCode, value: actualValue, persist });
+    const r = await api_connect('/vcp/set', { opPage, opCode, value: actualValue, persist });
 
     // Read back the value to verify
-    const readBack = await api('/vcp/get', { opPage, opCode });
+    const readBack = await api_connect('/vcp/get', { opPage, opCode });
     const setCorrectly = readBack.current === actualValue;
 
     if (setCorrectly) {
@@ -931,7 +942,7 @@ async function vcpGetCustom() {
   const opCode = parseInt(document.getElementById('vcp-code').value,  16);
   const el = document.getElementById('vcp-get-result');
   try {
-    const r = await api('/vcp/get', { opPage, opCode });
+    const r = await api_connect('/vcp/get', { opPage, opCode });
     el.innerHTML = '<span class="ok-text">✓</span>  type=' + r.type + '  max=' + r.max + '  current=<strong style="color:var(--accent)">' + r.current + '</strong>';
   } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
 }
@@ -943,7 +954,7 @@ async function vcpSetCustom() {
   const persist = document.getElementById('vcp-set-persist').checked;
   const el = document.getElementById('vcp-set-result');
   try {
-    const r = await api('/vcp/set', { opPage, opCode, value, persist });
+    const r = await api_connect('/vcp/set', { opPage, opCode, value, persist });
     el.innerHTML = '<span class="ok-text">✓</span>  requested=' + r.requested + '  max=' + r.max;
   } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
 }
@@ -972,7 +983,7 @@ function timingHTML(t) {
 }
 
 async function refreshTiming() {
-  try { const r = await api('/timing'); document.getElementById('timing-body').innerHTML = timingHTML(r); }
+  try { const r = await api_connect('/timing'); document.getElementById('timing-body').innerHTML = timingHTML(r); }
   catch(e) { document.getElementById('timing-body').innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
 }
 
@@ -1009,7 +1020,7 @@ function assetHTML(asset) {
 
 async function readAllAsset() {
   try {
-    const r = await api('/asset/readall');
+    const r = await api_connect('/asset/readall');
     document.getElementById('asset-display').innerHTML = assetHTML(r);
   } catch(e) {
     document.getElementById('asset-display').innerHTML = '<span class="error-text">' + esc(e.message) + '</span>';
@@ -1022,7 +1033,7 @@ async function writeAsset() {
   const el     = document.getElementById('asset-write-result');
   if (!text) { el.innerHTML = '<span class="error-text">Enter text to write</span>'; return; }
   try {
-    await api('/asset/write', { offset, text });
+    await api_connect('/asset/write', { offset, text });
     el.innerHTML = '<span class="ok-text">✓ Written — refreshing…</span>';
     setTimeout(readAllAsset, 500);
   } catch(e) { el.innerHTML = '<span class="error-text">' + esc(e.message) + '</span>'; }
@@ -1081,7 +1092,7 @@ function renderInput(inputSource) {
 
 async function refreshInput() {
   try {
-    const r = await api('/vcp/get', { opPage: 0x00, opCode: 0x60 });
+    const r = await api_connect('/vcp/get', { opPage: 0x00, opCode: 0x60 });
     renderInput({ current: r.current });
   } catch(e) { alert('Input refresh failed: ' + e.message); }
 }
@@ -1089,7 +1100,7 @@ async function refreshInput() {
 async function setInput(value) {
   const el = document.getElementById('input-result');
   try {
-    await api('/vcp/set', { opPage: 0x00, opCode: 0x60, value, persist: true });
+    await api_connect('/vcp/set', { opPage: 0x00, opCode: 0x60, value, persist: true });
     el.innerHTML = '<span class="ok-text">✓ Input switched — refreshing…</span>';
     setTimeout(async () => {
       try { await refreshInput(); el.innerHTML = ''; } catch {}
@@ -1158,10 +1169,10 @@ function renderDiag(selfDiag, tempSensor, ambientLight, powerMode) {
 async function refreshDiag() {
   try {
     const [diag, temp, lux, pm] = await Promise.allSettled([
-      api('/self-diagnosis'),
-      api('/vcp/get', { opPage: 0x02, opCode: 0x79 }),
-      api('/vcp/get', { opPage: 0x02, opCode: 0xB4 }),
-      api('/vcp/get', { opPage: 0x00, opCode: 0xD6 }),
+      api_connect('/self-diagnosis'),
+      api_connect('/vcp/get', { opPage: 0x02, opCode: 0x79 }),
+      api_connect('/vcp/get', { opPage: 0x02, opCode: 0xB4 }),
+      api_connect('/vcp/get', { opPage: 0x00, opCode: 0xD6 }),
     ]);
     renderDiag(
       diag.status === 'fulfilled' ? diag.value : { error: diag.reason?.message },
@@ -1261,7 +1272,7 @@ async function startScan() {
   resEl.innerHTML = '<span style="color:var(--muted);font-family:var(--mono);font-size:11px">Probing 254 hosts — this takes a few seconds…</span>';
 
   try {
-    const { results } = await api('/scan', { subnet, port });
+    const { results } = await api_connect('/scan', { subnet, port });
     statusEl.textContent = results.length + ' host(s) found';
     if (results.length === 0) {
       resEl.innerHTML = '<span style="color:var(--muted);font-family:var(--mono);font-size:11px">No NEC monitors found on ' + esc(subnet) + '.x:' + port + '</span>';
@@ -1320,7 +1331,7 @@ async function doEmergencyDisplay() {
   const el = document.getElementById('emrg-result');
   el.innerHTML = '<span style="color:var(--muted)">Saving input and activating…</span>';
   try {
-    const r = await api('/emergency/display');
+    const r = await api_connect('/emergency/display');
     const savedStr = r.savedInput != null
       ? ` (saved input 0x${r.savedInput.toString(16)})`
       : '';
@@ -1334,7 +1345,7 @@ async function doEmergencyStop() {
   const el = document.getElementById('emrg-result');
   el.innerHTML = '<span style="color:var(--muted)">Stopping…</span>';
   try {
-    const r = await api('/emergency/stop');
+    const r = await api_connect('/emergency/stop');
     const methodStr = r.method === 'input-restore'
       ? `restored input 0x${r.restoredInput.toString(16)}`
       : 'formal stop command sent';
@@ -1417,7 +1428,7 @@ async function refreshPlayerFolder() {
   const el = document.getElementById('player-current-folder');
   el.textContent = 'reading…';
   try {
-    const r = await api('/player/folder', { tvIP });
+    const r = await api_connect('/player/folder', { tvIP });
     el.textContent = r.folder ?? 'unknown';
   } catch(e) { el.textContent = 'error: ' + e.message; }
 }
@@ -1443,7 +1454,7 @@ async function loadPlayerFolders(tvIP) {
   const el = document.getElementById('player-folder-btns');
   if (el) el.innerHTML = '<span style="color:var(--muted);font-size:11px">Loading folders…</span>';
   try {
-    const r = await api('/player/folders', { tvIP });
+    const r = await api_connect('/player/folders', { tvIP });
     playerFolders = r.folders || [];
     renderPlayerFolderButtons();
   } catch(e) {
@@ -1470,7 +1481,7 @@ async function doPlayFolder(idx) {
 
   resultEl.innerHTML = `<span style="color:var(--muted)">Checking folder contents…</span>`;
   try {
-    const r = await api('/player/play', { tvIP, folder, restoreInput, interval });
+    const r = await api_connect('/player/play', { tvIP, folder, restoreInput, interval });
     if (!r.ok) {
       if (activeBtn) activeBtn.className = 'btn-secondary';
       resultEl.innerHTML = `<span class="error-text">✗ ${esc(r.error ?? 'failed')}</span>`;
@@ -1499,7 +1510,7 @@ async function doPlayerStop() {
 
   resultEl.innerHTML = `<span style="color:var(--muted)">Turning off autoplay…</span>`;
   try {
-    const r = await api('/player/stop', { sessionId, tvIP, restoreInput });
+    const r = await api_connect('/player/stop', { sessionId, tvIP, restoreInput });
     resultEl.innerHTML = r.ok
       ? `<span class="ok-text">✓ Autoplay off — input restored</span>`
       : `<span class="error-text">Error: ${esc(JSON.stringify(r))}</span>`;
@@ -1547,7 +1558,7 @@ function renderOsd(infoOsd) {
 
 async function refreshOsd() {
   try {
-    const r = await api('/vcp/get', { opPage: 0x02, opCode: 0x3D });
+    const r = await api_connect('/vcp/get', { opPage: 0x02, opCode: 0x3D });
     renderOsd({ current: r.current, max: r.max });
   } catch(e) { alert('OSD refresh failed: ' + e.message); }
 }
@@ -1555,7 +1566,7 @@ async function refreshOsd() {
 async function setOsd(value) {
   const el = document.getElementById('osd-result');
   try {
-    await api('/vcp/set', { opPage: 0x02, opCode: 0x3D, value, persist: true });
+    await api_connect('/vcp/set', { opPage: 0x02, opCode: 0x3D, value, persist: true });
     el.innerHTML = value === 0
       ? '<span class="ok-text">✓ OSD disabled</span>'
       : '<span class="ok-text">✓ OSD set to ' + value + 's</span>';
@@ -1658,8 +1669,8 @@ async function loadAssetManager() {
   if (!el) return;
   try {
     const [reg, { items }] = await Promise.all([
-      api('/registry', null, 'GET'),
-      api('/cache',    null, 'GET'),
+      api_connect('/registry', null, 'GET'),
+      api_connect('/cache',    null, 'GET'),
     ]);
     amReg   = reg;
     amItems = items || [];
@@ -1852,7 +1863,7 @@ async function amDeleteAsset(hash) {
 
 async function amAddToGroup(hash, groupId) {
   try {
-    const r = await api('/groups/' + groupId + '/assets', { hashes: [hash] });
+    const r = await api_connect('/groups/' + groupId + '/assets', { hashes: [hash] });
     if (r.error) throw new Error(r.error);
     await loadAssetManager();
   } catch(e) { alert('Error: ' + e.message); }
@@ -1930,7 +1941,7 @@ async function amCreateGroup() {
   const name = inp?.value.trim();
   if (!name) { alert('Enter a group name.'); return; }
   try {
-    const r = await api('/groups', { name });
+    const r = await api_connect('/groups', { name });
     if (r.error) throw new Error(r.error);
     inp.value = '';
     await loadAssetManager();
@@ -2284,7 +2295,7 @@ async function loadTempFolderSummary() {
   } catch { card.style.display = 'none'; }
 }
 
-// Generic fetch helper (supplements existing api() which uses POST)
+// Generic fetch helper (supplements existing api_connect() which uses POST)
 async function apiFetch(url, method = 'GET', body = null) {
   const opts = { method, headers: {} };
   if (body) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
@@ -2307,7 +2318,7 @@ async function amRegisterDevice() {
   if (!mac)  { alert('TV MAC address is required.'); return; }
   if (!name) { alert('Device name is required.'); return; }
   try {
-    const r = await api('/devices', { tvMac: mac, name, ...(tvIp ? { tvIp } : {}) });
+    const r = await api_connect('/devices', { tvMac: mac, name, ...(tvIp ? { tvIp } : {}) });
     if (r.error) throw new Error(r.error);
     document.getElementById('am-reg-mac').value  = '';
     document.getElementById('am-reg-name').value = '';
@@ -2350,7 +2361,7 @@ async function amAssignFromSelect(mac, macId) {
   const sel = document.getElementById('am-agrp-' + macId);
   if (!sel || !sel.value) return;
   try {
-    const r = await api('/devices/' + mac + '/groups', { groupId: sel.value });
+    const r = await api_connect('/devices/' + mac + '/groups', { groupId: sel.value });
     if (r.error) throw new Error(r.error);
     await loadAssetManager();
   } catch(e) { alert('Error: ' + e.message); }
@@ -2371,7 +2382,7 @@ async function amSetDefaultGroup(mac, gid, macId) {
   const stEl   = document.getElementById('am-pst-' + macId);
   if (stEl) stEl.textContent = `Setting default to "${name}"…`;
   try {
-    const r = await api('/devices/' + mac + '/default-group', { groupId: gid });
+    const r = await api_connect('/devices/' + mac + '/default-group', { groupId: gid });
     if (r.error) throw new Error(r.error);
     if (r.activeEvent) {
       if (stEl) stEl.innerHTML =
@@ -2397,7 +2408,7 @@ async function amPlayGroup(tvIp, gid, macId, mac) {
   const stEl   = document.getElementById('am-pst-' + macId);
   if (stEl) stEl.textContent = `Setting autoplay "${folder}"…`;
   try {
-    const r = await api('/player/play', { sessionId, tvIP: tvIp || '', folder, mac });
+    const r = await api_connect('/player/play', { sessionId, tvIP: tvIp || '', folder, mac });
     if (r.error) throw new Error(r.error);
     if (stEl) stEl.innerHTML = r.applied
       ? `<span class="ok-text">▶ Now playing "${esc(folder)}"</span>`
@@ -2412,7 +2423,7 @@ async function amPlayerOff(tvIp, macId, mac) {
   const stEl = document.getElementById('am-pst-' + macId);
   if (stEl) stEl.textContent = 'Setting autoplay off…';
   try {
-    const r = await api('/player/stop', { sessionId, tvIP: tvIp || '', mac });
+    const r = await api_connect('/player/stop', { sessionId, tvIP: tvIp || '', mac });
     if (r.error) throw new Error(r.error);
     if (stEl) stEl.innerHTML = r.applied
       ? `<span class="ok-text">■ Autoplay off</span>`
@@ -2427,7 +2438,7 @@ async function amPushAll(mac, macId) {
   const stEl = document.getElementById('am-pst-' + macId);
   if (stEl) stEl.textContent = 'Pushing all groups…';
   try {
-    const r = await api('/devices/' + mac + '/push-all', {});
+    const r = await api_connect('/devices/' + mac + '/push-all', {});
     if (r.error) throw new Error(r.error);
     const lines = (r.results || []).map(res => {
       if (res.status === 'pushed')
@@ -2714,9 +2725,9 @@ async function amSaveEvent() {
 
   try {
     if (e._id) {
-      await api('/events/' + e._id, { name: e.name, subEvents: subEventsUTC }, 'PUT');
+      await api_connect('/events/' + e._id, { name: e.name, subEvents: subEventsUTC }, 'PUT');
     } else {
-      await api('/events', { name: e.name, subEvents: subEventsUTC });
+      await api_connect('/events', { name: e.name, subEvents: subEventsUTC });
     }
     amEventEdit = null;
     await loadAssetManager();
