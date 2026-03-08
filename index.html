@@ -609,6 +609,7 @@ function renderImageControls(vcp) {
   const sliders = [
     { name:'brightness', label:'Brightness', opPage:0x00, opCode:0x10 },
     { name:'contrast',   label:'Contrast',   opPage:0x00, opCode:0x12 },
+    { name:'backlight',  label:'Backlight',  opPage:0x00, opCode:0x92 },
     { name:'sharpness',  label:'Sharpness',  opPage:0x00, opCode:0x87 },
     { name:'volume',     label:'Volume',     opPage:0x00, opCode:0x62 },
     { name:'redGain',    label:'Red Gain',   opPage:0x00, opCode:0x16 },
@@ -643,8 +644,8 @@ function renderImageControls(vcp) {
 }
 
 async function refreshImageControls() {
-  const names = ['brightness','contrast','sharpness','volume','redGain','greenGain','blueGain'];
-  const codes  = {brightness:[0,0x10],contrast:[0,0x12],sharpness:[0,0x87],volume:[0,0x62],redGain:[0,0x16],greenGain:[0,0x18],blueGain:[0,0x1A]};
+  const names = ['brightness','contrast','backlight','sharpness','volume','redGain','greenGain','blueGain'];
+  const codes  = {brightness:[0,0x10],contrast:[0,0x12],backlight:[0,0x92],sharpness:[0,0x87],volume:[0,0x62],redGain:[0,0x16],greenGain:[0,0x18],blueGain:[0,0x1A]};
   for (const name of names) {
     try {
       const [pg, oc] = codes[name];

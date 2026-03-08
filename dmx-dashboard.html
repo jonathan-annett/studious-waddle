@@ -359,9 +359,9 @@ body.console-mode #console-body { display: block; }
     <div class="level-row">
       <div class="level-label">Backlight <span class="level-val" id="lv-backlight">—</span></div>
       <input type="range" min="0" max="100" value="0" class="ctrl"
-        id="sl-backlight" data-vcp-name="backlight" data-opcode="0x13"
+        id="sl-backlight" data-vcp-name="backlight" data-opcode="0x92"
         oninput="onSlider('backlight',this.value)"
-        onchange="doVcp(0x00,0x13,this.value)">
+        onchange="doVcp(0x00,0x92,this.value)">
       <button class="lock-btn" id="lock-backlight" onclick="toggleLock('backlight')" title="Lock: prevent console from changing">🔓</button>
       <button class="lock-btn" id="reset-backlight" onclick="resetToDefault('backlight')" title="Reset to default and lock">↺</button>
       <div class="level-status" id="status-backlight"></div>
@@ -431,7 +431,7 @@ let vcpLockedState = {};      // { brightness: false, contrast: true, ... }
 const VCP_CONTROLS = {
   brightness: { opCode: 0x10, name: 'brightness' },
   contrast:   { opCode: 0x12, name: 'contrast' },
-  backlight:  { opCode: 0x13, name: 'backlight' },
+  backlight:  { opCode: 0x92, name: 'backlight' },
   sharpness:  { opCode: 0x87, name: 'sharpness' },
   volume:     { opCode: 0x62, name: 'volume' },
 };

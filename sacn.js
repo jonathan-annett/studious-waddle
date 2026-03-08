@@ -327,7 +327,7 @@ export function createHandlers(deps) {
     const vcpMap = [
       { idx: 3, key: 'brightness', page: 0x00, code: 0x10 },
       { idx: 4, key: 'contrast',   page: 0x00, code: 0x12 },
-      { idx: 5, key: 'backlight',  page: 0x00, code: 0x13 },
+      { idx: 5, key: 'backlight',  page: 0x00, code: 0x92 },
       { idx: 6, key: 'sharpness',  page: 0x00, code: 0x87 },
       { idx: 7, key: 'volume',     page: 0x00, code: 0x62 },
       { idx: 8, key: 'colorTemp',  page: 0x00, code: 0x14 },
