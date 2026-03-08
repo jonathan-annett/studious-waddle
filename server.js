@@ -88,7 +88,8 @@ console.log(`[startup] Registry file exists: ${fs.existsSync(REGISTRY_FILE) ? 'y
 // Registry — groups & device assignments
 // Stored as CACHE_DIR/registry.json:
 //   { groups: { <id> → { name, assets: [sha256, ...] } },
-//     devices: { <mac> → { name, tvIp, playerMac?, groups: [id, ...] } } }
+//     devices: { <mac> → { name, tvIp, playerMac?, groups: [id, ...] } },
+//     defaults: { brightness, contrast, backlight, sharpness, volume, ... } }
 // The "all" pseudo-group is never stored here — it is computed on demand
 // as every sha256 currently in the cache.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,10 +106,13 @@ function loadRegistry() {
   }
   try {
     _registryJson = fs.readFileSync(REGISTRY_FILE, 'utf8');
-    return JSON.parse(_registryJson);
+    const reg = JSON.parse(_registryJson);
+    // Ensure defaults section exists
+    if (!reg.defaults) reg.defaults = {};
+    return reg;
   } catch (e) {
     console.log(`[registry] Could not load ${REGISTRY_FILE} — initializing empty: ${e.message}`);
-    return { groups: {}, devices: {}, players: {}, events: {} };
+    return { groups: {}, devices: {}, players: {}, events: {}, defaults: {} };
   }
 }
 
@@ -1055,6 +1059,27 @@ async function handleApi(method, pathname, body, req) {
     const r = await s.session.powerSet(monitorId ?? s.monitorId, state);
     log('info', 'Power set reply', r);
     return r;
+  }
+
+  // GET /api/defaults
+  // Return the default TV settings stored in registry
+  if (method === 'GET' && pathname === '/api/defaults') {
+    const reg = loadRegistry();
+    return { defaults: reg.defaults || {} };
+  }
+
+  // POST /api/defaults  { settings: { brightness, contrast, backlight, ... } }
+  // Save default TV settings to registry
+  if (method === 'POST' && pathname === '/api/defaults') {
+    const { settings } = body;
+    if (!settings || typeof settings !== 'object') {
+      return { error: 'settings must be an object' };
+    }
+    const reg = loadRegistry();
+    reg.defaults = { ...settings };
+    saveRegistry(reg);
+    log('info', `Saved default TV settings: ${Object.keys(reg.defaults).join(', ')}`);
+    return { ok: true, defaults: reg.defaults };
   }
 
   // POST /api/asset/read  { sessionId, offset, length }

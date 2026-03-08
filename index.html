@@ -638,9 +638,16 @@ function renderImageControls(vcp) {
 
   document.getElementById('card-image').innerHTML = `
   <div class="card-header"><h2>Image Controls</h2>
-    <button class="btn-secondary" onclick="refreshImageControls()">↻ Refresh</button>
+    <div style="display:flex; gap:8px; flex-wrap:wrap">
+      <button class="btn-secondary" onclick="refreshImageControls()">↻ Refresh</button>
+      <button class="btn-secondary" onclick="loadDefaultSettings()">⬇ Load Defaults</button>
+      <button class="btn-secondary" onclick="saveDefaultSettings()">⬆ Save as Defaults</button>
+    </div>
   </div>
-  <div class="card-body"><div class="settings-grid">${items}</div></div>`;
+  <div class="card-body">
+    <div id="defaults-status" style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:12px"></div>
+    <div class="settings-grid">${items}</div>
+  </div>`;
 }
 
 async function refreshImageControls() {
@@ -664,6 +671,106 @@ async function setVcp(opPage, opCode, value, valId) {
     if (valId) document.getElementById(valId).textContent = value;
   } catch(e) {
     alert('VCP set failed: ' + e.message);
+  }
+}
+
+async function loadDefaultSettings() {
+  const statusEl = document.getElementById('defaults-status');
+  if (!statusEl) return;
+
+  statusEl.innerHTML = '<span style="color:var(--accent)">⟳ Loading defaults...</span>';
+
+  try {
+    // Get defaults from registry
+    const response = await api('/defaults');
+    const defaults = response.defaults || {};
+
+    // List of all VCP controls with their codes
+    const controls = {
+      brightness:  [0x00, 0x10],
+      contrast:    [0x00, 0x12],
+      backlight:   [0x00, 0x92],
+      sharpness:   [0x00, 0x87],
+      volume:      [0x00, 0x62],
+      redGain:     [0x00, 0x16],
+      greenGain:   [0x00, 0x18],
+      blueGain:    [0x00, 0x1A],
+    };
+
+    const applied = [];
+    for (const [name, value] of Object.entries(defaults)) {
+      if (controls[name]) {
+        const [page, code] = controls[name];
+        try {
+          await api('/vcp/set', { opPage: page, opCode: code, value: value, persist: false });
+
+          // Update UI elements
+          const rangeEl = document.getElementById('range-' + name);
+          const valEl   = document.getElementById('val-'   + name);
+          if (rangeEl) rangeEl.value = value;
+          if (valEl) valEl.textContent = value;
+
+          applied.push(name);
+        } catch(e) {
+          console.warn(`Failed to set ${name}: ${e.message}`);
+        }
+      }
+    }
+
+    if (applied.length > 0) {
+      statusEl.innerHTML = `<span class="ok-text">✓</span> Loaded ${applied.length} default setting(s): ${applied.join(', ')}`;
+    } else {
+      statusEl.innerHTML = '<span style="color:var(--muted)">No defaults saved yet</span>';
+    }
+  } catch(e) {
+    statusEl.innerHTML = `<span class="error-text">✗ Error: ${esc(e.message)}</span>`;
+  }
+}
+
+async function saveDefaultSettings() {
+  const statusEl = document.getElementById('defaults-status');
+  if (!statusEl) return;
+
+  statusEl.innerHTML = '<span style="color:var(--accent)">⟳ Reading current values...</span>';
+
+  try {
+    // List of all VCP controls with their codes
+    const names = ['brightness','contrast','backlight','sharpness','volume','redGain','greenGain','blueGain'];
+    const codes  = {
+      brightness: [0,0x10],
+      contrast:   [0,0x12],
+      backlight:  [0,0x92],
+      sharpness:  [0,0x87],
+      volume:     [0,0x62],
+      redGain:    [0,0x16],
+      greenGain:  [0,0x18],
+      blueGain:   [0,0x1A],
+    };
+
+    const settings = {};
+    for (const name of names) {
+      try {
+        const [pg, oc] = codes[name];
+        const r = await api('/vcp/get', { opPage: pg, opCode: oc });
+        settings[name] = r.current;
+      } catch(e) {
+        console.warn(`Failed to read ${name}: ${e.message}`);
+      }
+    }
+
+    if (Object.keys(settings).length === 0) {
+      statusEl.innerHTML = '<span style="color:var(--muted)">No values could be read from device</span>';
+      return;
+    }
+
+    // Save to registry
+    statusEl.innerHTML = '<span style="color:var(--accent)">⟳ Saving defaults...</span>';
+    const response = await api('/defaults', settings, 'POST');
+
+    const savedCount = Object.keys(settings).length;
+    statusEl.innerHTML = `<span class="ok-text">✓</span> Saved ${savedCount} default setting(s): ${Object.keys(settings).join(', ')}`;
+  } catch(e) {
+    statusEl.innerHTML = `<span class="error-text">✗ Error: ${esc(e.message)}</span>`;
   }
 }
 
