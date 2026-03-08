@@ -433,7 +433,7 @@ function toggleDeviceExpand(mac) {
 
 // ─── api helpers ────────────────────────────────────────────────────────────
 
-async function api_connect(path, body, method) {
+async function api(path, body, method) {
   if (!method || method === 'POST' || method === 'PUT') {
     const r = await fetch('/api' + path, {
       method: method || 'POST',
@@ -453,7 +453,7 @@ async function api_connect(path, body, method) {
 
 async function api_connect(path, body, method) {
   try {
-    return await  api_connect(path, body, method) ;
+    return await  api(path, body, method) ;
   } catch (e) {
     if (e.error === 'session not found') {
         await connect() ;
