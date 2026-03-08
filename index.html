@@ -706,40 +706,116 @@ function renderVcpCustom() {
   document.getElementById('card-vcp-custom').innerHTML = `
   <div class="card-header"><h2>Raw VCP Access</h2></div>
   <div class="card-body">
-    <div class="form-row">
-      <div class="form-group">
-        <label>Op Page (hex)</label>
-        <input type="text" id="vcp-page" value="00" style="width:80px">
+    <fieldset style="border:1px solid var(--border); padding:12px; margin-bottom:16px; border-radius:4px">
+      <legend style="padding:0 4px">Read Current Value</legend>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Op Page (hex)</label>
+          <input type="text" id="vcp-page" value="00" style="width:80px">
+        </div>
+        <div class="form-group">
+          <label>Op Code (hex)</label>
+          <input type="text" id="vcp-code" value="10" style="width:80px">
+        </div>
+        <button class="btn-secondary" onclick="vcpGetCustom()">GET</button>
       </div>
-      <div class="form-group">
-        <label>Op Code (hex)</label>
-        <input type="text" id="vcp-code" value="10" style="width:80px">
+      <div id="vcp-get-result" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
+    </fieldset>
+
+    <fieldset style="border:1px solid var(--border); padding:12px; border-radius:4px">
+      <legend style="padding:0 4px">Set Value with Slider</legend>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Op Page (hex)</label>
+          <input type="text" id="vcp-set-page" value="00" style="width:80px">
+        </div>
+        <div class="form-group">
+          <label>Op Code (hex)</label>
+          <input type="text" id="vcp-set-code" value="10" style="width:80px">
+        </div>
+        <div class="form-group">
+          <label>Min</label>
+          <input type="number" id="vcp-slider-min" value="0" style="width:70px">
+        </div>
+        <div class="form-group">
+          <label>Max</label>
+          <input type="number" id="vcp-slider-max" value="100" style="width:70px">
+        </div>
+        <div class="form-group">
+          <label>Persist</label>
+          <input type="checkbox" id="vcp-set-persist" checked style="margin-top:8px">
+        </div>
       </div>
-      <button class="btn-secondary" onclick="vcpGetCustom()">GET</button>
-    </div>
-    <div id="vcp-get-result" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
-    <hr>
-    <div class="form-row">
-      <div class="form-group">
-        <label>Op Page (hex)</label>
-        <input type="text" id="vcp-set-page" value="00" style="width:80px">
+
+      <div class="form-row" style="margin-top:12px">
+        <div class="form-group" style="flex:1">
+          <label>Value</label>
+          <input type="number" id="vcp-set-value" value="50" style="width:100%">
+        </div>
       </div>
-      <div class="form-group">
-        <label>Op Code (hex)</label>
-        <input type="text" id="vcp-set-code" value="10" style="width:80px">
+
+      <div class="form-row" style="margin-top:8px">
+        <input type="range" id="vcp-slider"
+          min="0" max="100" value="50"
+          style="flex:1; cursor:pointer"
+          oninput="updateVcpSliderValue(this.value)"
+          onmouseup="vcpSetFromSlider()">
       </div>
-      <div class="form-group">
-        <label>Value (decimal)</label>
-        <input type="number" id="vcp-set-value" value="50" style="width:90px">
+
+      <div style="margin-top:12px; padding:8px; background:var(--bg-alt); border-radius:3px; font-size:11px">
+        <div id="vcp-slider-status" style="font-family:var(--mono); color:var(--muted)">Ready</div>
       </div>
-      <div class="form-group">
-        <label>Persist</label>
-        <input type="checkbox" id="vcp-set-persist" checked style="margin-top:8px">
-      </div>
-      <button class="btn-primary" onclick="vcpSetCustom()">SET</button>
-    </div>
-    <div id="vcp-set-result" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
+
+      <button class="btn-primary" onclick="vcpSetCustom()" style="margin-top:12px; width:100%">SET (Manual)</button>
+    </fieldset>
+
+    <div id="vcp-set-result" style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:12px"></div>
   </div>`;
+}
+
+function updateVcpSliderValue(sliderValue) {
+  const min = parseInt(document.getElementById('vcp-slider-min').value, 10) || 0;
+  const max = parseInt(document.getElementById('vcp-slider-max').value, 10) || 100;
+  const slider = document.getElementById('vcp-slider');
+
+  // Map slider position (0-100) to actual min-max range
+  const actualValue = min + (sliderValue / 100) * (max - min);
+  document.getElementById('vcp-set-value').value = Math.round(actualValue);
+
+  const statusEl = document.getElementById('vcp-slider-status');
+  statusEl.innerHTML = `<span style="color:var(--muted)">Adjusting... value=${Math.round(actualValue)}</span>`;
+}
+
+async function vcpSetFromSlider() {
+  const min = parseInt(document.getElementById('vcp-slider-min').value, 10) || 0;
+  const max = parseInt(document.getElementById('vcp-slider-max').value, 10) || 100;
+  const slider = document.getElementById('vcp-slider');
+  const opPage = parseInt(document.getElementById('vcp-set-page').value, 16);
+  const opCode = parseInt(document.getElementById('vcp-set-code').value, 16);
+  const persist = document.getElementById('vcp-set-persist').checked;
+
+  // Map slider position to actual value
+  const actualValue = Math.round(min + (slider.value / 100) * (max - min));
+  document.getElementById('vcp-set-value').value = actualValue;
+
+  const statusEl = document.getElementById('vcp-slider-status');
+  statusEl.innerHTML = `<span style="color:var(--accent)">⟳ Setting 0x${opPage.toString(16).toUpperCase().padStart(2,'0')} / 0x${opCode.toString(16).toUpperCase().padStart(2,'0')} = ${actualValue}...</span>`;
+
+  try {
+    const r = await api('/vcp/set', { opPage, opCode, value: actualValue, persist });
+
+    // Read back the value to verify
+    const readBack = await api('/vcp/get', { opPage, opCode });
+    const setCorrectly = readBack.current === actualValue;
+
+    if (setCorrectly) {
+      statusEl.innerHTML = `<span class="ok-text">✓</span> Value set and verified: requested=${actualValue}, confirmed=${readBack.current}, max=${readBack.max}`;
+    } else {
+      statusEl.innerHTML = `<span class="warn-text">⚠</span> MISMATCH: requested=${actualValue}, read back=${readBack.current}, max=${readBack.max}`;
+    }
+  } catch(e) {
+    statusEl.innerHTML = `<span class="error-text">✗</span> Error: ${esc(e.message)}`;
+  }
 }
 
 async function vcpGetCustom() {

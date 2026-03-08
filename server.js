@@ -29,6 +29,22 @@ import {
   encodeWeekMask,
 } from './nec-protocol.js';
 
+import {
+  SACN_PORT,
+  SACN_ACTIVE_THRESHOLD,
+  SACN_DISPATCH_DEBOUNCE,
+  SACN_FOLDER_DEBOUNCE,
+  SACN_INPUT_BANDS,
+  SACN_TEMP_PREFIX,
+  parseSacnPacket,
+  sacnMulticastAddr,
+  sacnInputCode,
+  joinUniverse,
+  leaveUniverse,
+  SacnStateManager,
+  createHandlers,
+} from './sacn.js';
+
 const PORT        = parseInt(process.argv[2] ?? '3000', 10);
 const PROJECT_DIR = path.dirname(new URL(import.meta.url).pathname);
 
@@ -315,7 +331,7 @@ async function checkSchedule() {
     const device = reg.devices?.[mac];
     if (!device) continue;
     // sACN show mode — console has full control, scheduler steps aside entirely
-    if (sacnState.get(mac)?.showMode) continue;
+    if (sacnStateManager?.getState(mac)?.showMode) continue;
     const desired = getDesiredAutoplay(mac, reg);
 
     if (device.autoplay !== desired) {
@@ -403,13 +419,8 @@ const sessions = new Map();
 // device comes back online and is handled by device-online.
 const playRetryState = new Map();
 
-// sACN per-device state and persistent NEC sessions
-// sacnState:    mac → { dmx: Uint8Array(512), lastPacket: ms, showMode: bool, timers: {}, lastSent: {} }
-// sacnSessions: mac → { session: Session, monitorId: number }
-// sacnSocket:   singleton UDP socket + joined multicast set
-const sacnState    = new Map();
-const sacnSessions = new Map();
-const sacnSocket   = { sock: null, joined: new Set() };
+// sACN state manager (initialized at startup)
+let sacnStateManager = null;
 
 function newId() { return crypto.randomBytes(6).toString('hex'); }
 
@@ -2204,7 +2215,9 @@ async function handleApi(method, pathname, body, req) {
     if (!reg.devices?.[mac]) return { error: 'device not found' };
     reg.devices[mac].sacnUniverse = universe;
     saveRegistry(reg);
-    joinUniverse(universe);
+    if (sacnStateManager) {
+      joinUniverse(universe, sacnStateManager.socket, getLocalIp(), log);
+    }
     return { ok: true, mac, universe };
   }
 
@@ -2214,7 +2227,9 @@ async function handleApi(method, pathname, body, req) {
     const reg = loadRegistry();
     if (!reg.devices?.[mac]) return { error: 'device not found' };
     const old = reg.devices[mac].sacnUniverse;
-    if (old != null) leaveUniverse(old);
+    if (old != null && sacnStateManager) {
+      leaveUniverse(old, sacnStateManager.socket);
+    }
     delete reg.devices[mac].sacnUniverse;
     saveRegistry(reg);
     return { ok: true };
@@ -2224,7 +2239,7 @@ async function handleApi(method, pathname, body, req) {
   if (method === 'GET' && /^\/api\/sacn\/[^/]+\/state$/.test(pathname)) {
     const mac = normalizeMac(pathname.split('/')[3]);
     const reg = loadRegistry();
-    const st  = sacnState.get(mac);
+    const st  = sacnStateManager?.getState(mac);
     return {
       mac,
       showMode:   st?.showMode ?? false,
@@ -3274,25 +3289,9 @@ const PLAYER_ROOT         = '/mnt/usb1';
 const INTERVAL_INFINITE   = 99999; // firmware accepts up to 99999s (~27hrs)
 const INTERVAL_DEFAULT    = 30;
 
-// ─── sACN / E1.31 constants ───────────────────────────────────────────────────
+// ─── sACN constants are imported from sacn.js ──────────────────────────────────
 const FFMPEG_PATH            = '/usr/bin/ffmpeg';
 const THUMB_DIR              = path.join(CACHE_DIR, 'thumbs');
-const SACN_PORT              = 5568;
-const SACN_FOLDER_CH_START   = 100;  // CH101 = 0-based index 100
-const SACN_FOLDER_COUNT      = 410;  // CH101–CH510
-const SACN_ACTIVE_THRESHOLD  = 128;  // ≥ this = fader "on"
-const SACN_TEMP_PREFIX       = '_show_';
-const SACN_DISPATCH_DEBOUNCE = 200;  // ms — VCP / input commands
-const SACN_FOLDER_DEBOUNCE   = 2000; // ms — folder switches
-// Input banding for CH3 (input select) and folder-stop fallback
-const SACN_INPUT_BANDS = [
-  { max: 0,   code: null   },   // 0 = no change
-  { max: 50,  code: 0x11   },   // 1–50   HDMI1
-  { max: 100, code: 0x12   },   // 51–100 HDMI2
-  { max: 150, code: 0x0F   },   // 101–150 DP1
-  { max: 200, code: 0x10   },   // 151–200 DP2
-  { max: 255, code: 0x87   },   // 201–255 MediaPlayer
-];
 
 /**
  * Set the AUTO PLAY folder on the media player.
@@ -3529,341 +3528,48 @@ function generateThumbnail(hash, ext) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Parse an E1.31 sACN UDP packet.
- * Returns { universe, dmx } or null if the packet is not valid sACN DMX data.
+ * Initialize the sACN listener and handler functions.
+ * Must be called once at startup after the registry is loaded.
  */
-function parseSacnPacket(buf) {
-  if (buf.length < 126) return null;
-  // Preamble size must be 0x0010
-  if (buf.readUInt16BE(0) !== 0x0010) return null;
-  // ACN packet identifier: "ASC-E1.17\0\0\0" at bytes 4–15 (uppercase)
-  const ACN_ID = Buffer.from([0x41,0x53,0x43,0x2D,0x45,0x31,0x2E,0x31,0x37,0x00,0x00,0x00]);
-  if (!buf.slice(4, 16).equals(ACN_ID)) return null;
-  // Root layer vector must be 0x00000004 (VECTOR_ROOT_E131_DATA)
-  if (buf.readUInt32BE(18) !== 0x00000004) return null;
-  // Framing layer vector must be 0x00000002 (VECTOR_E131_DATA_PACKET)
-  if (buf.readUInt32BE(40) !== 0x00000002) return null;
-  const universe  = buf.readUInt16BE(113);
-  const propCount = buf.readUInt16BE(123);
-  if (buf.length < 126 + propCount - 1) return null;
-  // Byte at offset 125 is the start code (must be 0x00 for standard DMX)
-  if (buf[125] !== 0x00) return null;
-  const dmx = buf.slice(126, 126 + propCount - 1); // up to 512 bytes
-  return { universe, dmx };
-}
-
-/** Return the multicast address for a given sACN universe number. */
-function sacnMulticastAddr(universe) {
-  return `239.255.${(universe >> 8) & 0xFF}.${universe & 0xFF}`;
-}
-
-/** Map a 0–255 DMX channel value to a NEC VCP input code via banding. Returns null for "no change". */
-function sacnInputCode(value) {
-  for (const band of SACN_INPUT_BANDS) {
-    if (value <= band.max) return band.code;
-  }
-  return null;
-}
-
-/** Get or open a persistent NEC session for sACN control of a device. */
-async function getSacnSession(mac) {
-  const existing = sacnSessions.get(mac);
-  if (existing) {
-    // Verify session is still alive (with timeout to avoid hanging on half-open sockets)
-    const probe   = existing.session.vcpGet(existing.monitorId, 0x00, 0xD6);
-    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('probe timeout')), 3000));
-    try { await Promise.race([probe, timeout]); return existing; }
-    catch { sacnSessions.delete(mac); }
-  }
-  const reg    = loadRegistry();
-  const device = reg.devices?.[mac];
-  if (!device?.tvIp) throw new Error(`No tvIp for MAC ${mac}`);
-  const session = await openTcpSession(device.tvIp, { port: 7142, keepAlive: true });
-  const entry   = { session, monitorId: 1 };
-  sacnSessions.set(mac, entry);
-  return entry;
-}
-
-/** Join a multicast group for a universe (idempotent). */
-function joinUniverse(universe) {
-  if (!sacnSocket.sock) { log('warn', `[sACN] socket not ready, cannot join universe ${universe}`); return; }
-  const addr = sacnMulticastAddr(universe);
-  if (sacnSocket.joined.has(addr)) return;
-  try {
-    // Find the local LAN interface (non-loopback IPv4)
-    let localIp = null;
-    const ifaces = os.networkInterfaces();
-    for (const [ifname, addrs] of Object.entries(ifaces)) {
-      const ipv4 = addrs.find(a => a.family === 'IPv4' && !a.internal);
-      if (ipv4) {
-        localIp = ipv4.address;
-        break;
-      }
-    }
-    if (localIp) {
-      sacnSocket.sock.addMembership(addr, localIp);
-    } else {
-      sacnSocket.sock.addMembership(addr);
-    }
-    sacnSocket.joined.add(addr);
-  } catch (e) {
-    log('warn', `[sACN] addMembership ${addr} failed: ${e.message}`);
-  }
-}
-
-/** Leave a multicast group for a universe. */
-function leaveUniverse(universe) {
-  if (!sacnSocket.sock) return;
-  const addr = sacnMulticastAddr(universe);
-  if (!sacnSocket.joined.has(addr)) return;
-  try { sacnSocket.sock.dropMembership(addr); sacnSocket.joined.delete(addr); }
-  catch { /* ignore */ }
-}
-
-/**
- * Handle CH1 (enable/show mode). No debounce — scheduler inhibit must be instant.
- */
-function sacnHandleEnable(mac, value) {
-  const st = sacnState.get(mac);
-  if (!st) return;
-  const showMode = value > 0;
-  if (st.showMode === showMode) return;
-  st.showMode = showMode;
-  log('info', `[sACN] ${mac} show mode ${showMode ? 'ON' : 'OFF'}`);
-  wsBroadcast({ type: 'sacn-status', mac, showMode });
-}
-
-/**
- * Handle VCP channels (CH2–CH9): power, input, brightness, contrast, backlight,
- * sharpness, volume, colour temp. Only sends NEC commands when values change.
- */
-async function sacnHandleVcp(mac, dmx) {
-  const st = sacnState.get(mac);
-  if (!st) return;
-  let sess;
-  try { sess = await getSacnSession(mac); }
-  catch (e) { log('warn', `[sACN] VCP session failed for ${mac}: ${e.message}`); return; }
-  const { session: s, monitorId: mid } = sess;
-
-  // CH2 (index 1) — power: 0–127 = standby (0x04), 128–255 = on (0x01)
-  const powerVal = dmx[1] !== undefined ? dmx[1] : 0;
-  const powerVcp = powerVal < 128 ? 0x04 : 0x01;
-  if (st.lastSent.power !== powerVcp) {
-    try { await s.vcpSet(mid, 0x00, 0xD6, powerVcp); st.lastSent.power = powerVcp; }
-    catch (e) { log('warn', `[sACN] power set failed: ${e.message}`); }
-  }
-
-  // CH3 (index 2) — input select
-  if (dmx[2] !== undefined && dmx[2] > 0) {
-    const inputCode = sacnInputCode(dmx[2]);
-    if (inputCode && st.lastSent.input !== inputCode) {
-      try { await s.vcpSet(mid, 0x00, 0x60, inputCode); st.lastSent.input = inputCode; }
-      catch (e) { log('warn', `[sACN] input set failed: ${e.message}`); }
-    }
-  }
-
-  // CH4–9: brightness, contrast, backlight, sharpness, volume, colour temp
-  const vcpMap = [
-    { idx: 3, key: 'brightness', page: 0x00, code: 0x10 },
-    { idx: 4, key: 'contrast',   page: 0x00, code: 0x12 },
-    { idx: 5, key: 'backlight',  page: 0x00, code: 0x13 },
-    { idx: 6, key: 'sharpness',  page: 0x00, code: 0x87 },
-    { idx: 7, key: 'volume',     page: 0x00, code: 0x62 },
-    { idx: 8, key: 'colorTemp',  page: 0x00, code: 0x14 },
-  ];
-  for (const { idx, key, page, code } of vcpMap) {
-    if (dmx[idx] === undefined) continue;
-    const scaled = Math.round(dmx[idx] / 255 * 100);
-    if (st.lastSent[key] === scaled) continue;
-    try { await s.vcpSet(mid, page, code, scaled); st.lastSent[key] = scaled; }
-    catch (e) { log('warn', `[sACN] VCP ${key} set failed: ${e.message}`); }
-  }
-}
-
-/**
- * Handle folder fader channels (CH101–510).
- * 0 active → stop (switch to CH3 input)
- * 1 active → play that folder
- * 2+ active → hold (crossfade in progress)
- */
-async function sacnHandleFolders(mac, dmx) {
-  const st = sacnState.get(mac);
-  if (st?.playing) { log('debug', `[sACN] play in progress for ${mac}, skipping`); return; }
-
-  const reg    = loadRegistry();
-  const device = reg.devices?.[mac];
-  if (!device) return;
-  const folders = reg.devices[mac].sacnFolders ?? [];
-
-  // Build bitmap of active folder faders (same as dashboard does)
-  let bitmap = 0;
-  for (let j = 0; j < folders.length; j++) {
-    const chIdx = folders[j].channel - 1; // 0-based
-    if (chIdx >= 0 && chIdx < 512 && (dmx[chIdx] ?? 0) >= SACN_ACTIVE_THRESHOLD) {
-      bitmap |= (1 << j);
-    }
-  }
-
-  const bitCount = bitmap.toString(2).split('1').length - 1; // count set bits
-  log('debug', `[sACN] folder bitmap: ${bitmap.toString(2).padStart(folders.length || 1, '0')} (${bitCount} active)`);
-
-  // Handle playback based on bitmap state
-  if (bitmap === 0) {
-    // All faders off — stop playback
-    log('debug', `[sACN] all folder faders down → stop`);
-    await sacnStopPlayback(mac, dmx[2] ?? 0);
-    return;
-  }
-
-  if ((bitmap & (bitmap - 1)) === 0) {
-    // Exactly one bit set — single folder active
-    const activeIdx = Math.log2(bitmap);
-    const folder = folders[activeIdx];
-    if (!folder) return;
-
-    if (device.autoplay === folder.name) {
-      log('debug', `[sACN] folder "${folder.name}" already playing`);
-      return;
-    }
-
-    if (!st?.showMode) {
-      log('warn', `[sACN] ${mac} folder fader active but CH1 (show mode) is OFF — scheduler may override`);
-    }
-
-    log('info', `[sACN] ${mac} → folder "${folder.name}" (ch ${folder.channel})`);
-    if (st) st.playing = true;
-    try {
-      // Extract actual folder name from folderPath (e.g. "/mnt/usb1/My Folder" → "My Folder")
-      // This ensures we search for the correct name in the player's filelist
-      // Handle both full paths and simple names
-      let actualFolderName = folder.folderPath;
-      if (folder.folderPath.includes('/')) {
-        actualFolderName = folder.folderPath.split('/').pop();
-      }
-      if (!actualFolderName) throw new Error(`Invalid folderPath: ${folder.folderPath}`);
-
-      log('debug', `[sACN] playFolder: display="${folder.name}" actual="${actualFolderName}" path="${folder.folderPath}"`);
-      await playFolder(device.tvIp, actualFolderName, null, 1);
-      // Re-load registry after play (may have been modified by scheduler/API during the ~8s play)
-      const freshReg = loadRegistry();
-      freshReg.devices[mac].autoplay = folder.name;
-      saveRegistry(freshReg);
-    } catch (e) {
-      log('warn', `[sACN] playFolder failed for ${mac}: ${e.message}`);
-    } finally {
-      if (st) st.playing = false;
-    }
-    return;
-  }
-
-  // 2+ bits set — crossfade hold
-  const activeNames = [];
-  for (let j = 0; j < folders.length; j++) {
-    if (bitmap & (1 << j)) activeNames.push(folders[j].name);
-  }
-  log('debug', `[sACN] ${bitCount} folders active (hold): ${activeNames.join(' + ')}`);
-}
-
-/** Stop media player and switch TV to the input specified by CH3 value. */
-async function sacnStopPlayback(mac, inputChannelValue) {
-  const reg    = loadRegistry();
-  const device = reg.devices?.[mac];
-  if (!device) return;
-
-  // Clear autoplay on player
-  try {
-    const playerIP = await getPlayerIP(device.tvIp);
-    await playerRequest(playerIP, '/cgi-bin/cgictrl?V=S,2A,2,0,0,%00,', 'POST');
-  } catch { /* player may not be reachable — continue with TV input switch */ }
-
-  // Switch TV input
-  const inputCode = (inputChannelValue > 0) ? sacnInputCode(inputChannelValue) : SAFE_INPUT;
-  if (!inputCode) return;
-  try {
-    const { session: s, monitorId: mid } = await getSacnSession(mac);
-    await s.vcpSet(mid, 0x00, 0x60, inputCode);
-    const freshReg = loadRegistry();
-    if (freshReg.devices?.[mac]) {
-      freshReg.devices[mac].autoplay = null;
-      saveRegistry(freshReg);
-    }
-  } catch (e) { log('warn', `[sACN] stop input switch failed: ${e.message}`); }
-}
-
-/**
- * Receive and dispatch a parsed sACN DMX frame for a device.
- * Diffs incoming values against stored state, debounces dispatch.
- */
-function sacnReceive(mac, incomingDmx) {
-  if (!sacnState.has(mac)) {
-    sacnState.set(mac, {
-      dmx:           new Uint8Array(512),
-      lastPacket:    0,
-      showMode:      false,
-      timers:        {},
-      lastSent:      {},
-      lastFolderBmp: 0,  // bitmap of previous active folder states
-    });
-  }
-  const st = sacnState.get(mac);
-  st.lastPacket = Date.now();
-
-  // Compute which channel groups changed
-  let vcpChanged    = false;
-  let folderChanged = false;
-  const oldDmx = st.dmx;
-  const newDmx = new Uint8Array(512);
-  for (let i = 0; i < Math.min(incomingDmx.length, 512); i++) newDmx[i] = incomingDmx[i];
-
-  // CH1 (index 0) — enable/show mode, no debounce
-  if (newDmx[0] !== oldDmx[0]) sacnHandleEnable(mac, newDmx[0]);
-
-  // CH2–9 (indices 1–8)
-  for (let i = 1; i <= 8; i++) { if (newDmx[i] !== oldDmx[i]) { vcpChanged = true; break; } }
-
-  // CH101–510: Use bitmap to detect state changes (not byte-by-byte)
-  // Only care if a fader crossed the 128 threshold, not if value changed within same state
-  let newFolderBmp = 0;
-  const reg = loadRegistry();
-  const folders = reg.devices?.[mac]?.sacnFolders ?? [];
-  for (let j = 0; j < folders.length; j++) {
-    const chIdx = folders[j].channel - 1; // 0-based
-    if (chIdx >= 0 && chIdx < 512 && (newDmx[chIdx] ?? 0) >= SACN_ACTIVE_THRESHOLD) {
-      newFolderBmp |= (1 << j);
-    }
-  }
-  if (newFolderBmp !== st.lastFolderBmp) {
-    folderChanged = true;
-    st.lastFolderBmp = newFolderBmp;
-  }
-
-  // Store snapshot
-  st.dmx = newDmx;
-
-  if (vcpChanged) {
-    clearTimeout(st.timers.vcp);
-    const snap = newDmx.slice(); // capture for closure
-    st.timers.vcp = setTimeout(() => sacnHandleVcp(mac, snap).catch(e => log('warn', `[sACN] VCP err: ${e.message}`)), SACN_DISPATCH_DEBOUNCE);
-  }
-
-  if (folderChanged) {
-    clearTimeout(st.timers.folder);
-    const snap = newDmx.slice();
-    st.timers.folder = setTimeout(() => sacnHandleFolders(mac, snap).catch(e => log('warn', `[sACN] folder err: ${e.message}`)), SACN_FOLDER_DEBOUNCE);
-  }
-
-  // Broadcast live channel values to dashboard (rate-limited: only when something changed)
-  if (vcpChanged || folderChanged || newDmx[0] !== oldDmx[0]) {
-    wsBroadcast({ type: 'sacn-update', mac, channels: Array.from(newDmx) });
-  }
-}
-
-/** Start the sACN UDP listener. Called once at server startup. */
-function startSacnListener() {
+function initSacn() {
   fs.mkdirSync(THUMB_DIR, { recursive: true });
 
+  // Create the state manager
+  sacnStateManager = new SacnStateManager();
+
+  // Create handler functions with injected dependencies
+  const handlers = createHandlers({
+    stateManager: sacnStateManager,
+    logger: log,
+    broadcaster: wsBroadcast,
+    registryLoader: loadRegistry,
+    registrySaver: saveRegistry,
+    getSacnSession: async (mac) => {
+      const existing = sacnStateManager.getSession(mac);
+      if (existing) {
+        // Verify session is still alive
+        const probe   = existing.session.vcpGet(existing.monitorId, 0x00, 0xD6);
+        const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('probe timeout')), 3000));
+        try { await Promise.race([probe, timeout]); return existing; }
+        catch { sacnStateManager.deleteSession(mac); }
+      }
+      const reg    = loadRegistry();
+      const device = reg.devices?.[mac];
+      if (!device?.tvIp) throw new Error(`No tvIp for MAC ${mac}`);
+      const session = await openTcpSession(device.tvIp, { port: 7142, keepAlive: true });
+      const entry   = { session, monitorId: 1 };
+      sacnStateManager.setSession(mac, entry);
+      return entry;
+    },
+    playFolder,
+    getPlayerIP,
+    playerRequest,
+    SAFE_INPUT,
+  });
+
+  // Set up UDP socket
   const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-  sacnSocket.sock = sock;
+  sacnStateManager.socket.sock = sock;
 
   sock.on('error', e => log('warn', `[sACN] socket error: ${e.message}`));
 
@@ -3875,7 +3581,7 @@ function startSacnListener() {
     const reg = loadRegistry();
     for (const [mac, device] of Object.entries(reg.devices ?? {})) {
       if (device.sacnUniverse === universe) {
-        sacnReceive(mac, dmx);
+        handlers.receive(mac, dmx);
         return;
       }
     }
@@ -3885,9 +3591,10 @@ function startSacnListener() {
     // Join multicast groups for all currently registered universes
     const reg = loadRegistry();
     const universes = [];
+    const localIp = getLocalIp();
     for (const device of Object.values(reg.devices ?? {})) {
       if (device.sacnUniverse) {
-        joinUniverse(device.sacnUniverse);
+        joinUniverse(device.sacnUniverse, sacnStateManager.socket, localIp, log);
         universes.push(device.sacnUniverse);
       }
     }
@@ -3895,6 +3602,16 @@ function startSacnListener() {
   });
 
   sock.bind(SACN_PORT);
+}
+
+/** Get the local IPv4 address (non-loopback). */
+function getLocalIp() {
+  const ifaces = os.networkInterfaces();
+  for (const [ifname, addrs] of Object.entries(ifaces)) {
+    const ipv4 = addrs.find(a => a.family === 'IPv4' && !a.internal);
+    if (ipv4) return ipv4.address;
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4057,7 +3774,7 @@ server.listen(PORT, () => {
   console.log(`[registry] Loaded — ${deviceCount} device(s), ${groupCount} group(s)`);
 
   // Start the sACN / E1.31 UDP listener
-  startSacnListener();
+  initSacn();
 
   // Start the event scheduler — runs every 60 seconds + on startup
   checkSchedule().catch(e => log('warn', `[scheduler] startup check failed: ${e.message}`));
