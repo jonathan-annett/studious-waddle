@@ -682,7 +682,7 @@ async function loadDefaultSettings() {
 
   try {
     // Get defaults from registry
-    const response = await api('/defaults',{});
+    const response = await api('/defaults',null,'GET');
     const defaults = response.defaults || {};
 
     // List of all VCP controls with their codes
