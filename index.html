@@ -765,7 +765,7 @@ async function saveDefaultSettings() {
 
     // Save to registry
     statusEl.innerHTML = '<span style="color:var(--accent)">⟳ Saving defaults...</span>';
-    const response = await api('/defaults', settings, 'POST');
+    const response = await api('/defaults', {settings}, 'POST');
 
     const savedCount = Object.keys(settings).length;
     statusEl.innerHTML = `<span class="ok-text">✓</span> Saved ${savedCount} default setting(s): ${Object.keys(settings).join(', ')}`;
