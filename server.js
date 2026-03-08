@@ -2484,6 +2484,7 @@ async function interrogateAll(session, monitorId) {
   // VCP codes
   const VCP_CODES = [
     { name: 'brightness',   opPage: 0x00, opCode: 0x10 },
+    { name: 'backlight',    opPage: 0x00, opCode: 0x92 },
     { name: 'contrast',     opPage: 0x00, opCode: 0x12 },
     { name: 'sharpness',    opPage: 0x00, opCode: 0x87 },
     { name: 'colorTemp',    opPage: 0x00, opCode: 0x14 },
