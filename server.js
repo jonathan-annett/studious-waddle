@@ -77,10 +77,19 @@ console.log(`[startup] Registry file exists: ${fs.existsSync(REGISTRY_FILE) ? 'y
 // as every sha256 currently in the cache.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Cached registry JSON string — avoids ~88 synchronous file reads/sec from sACN packets.
+// loadRegistry() parses the cached string (cheap) instead of hitting flash storage.
+// saveRegistry() updates both the cache and the file atomically.
+let _registryJson = null;
+
 function loadRegistry() {
+  if (_registryJson) {
+    try { return JSON.parse(_registryJson); }
+    catch { _registryJson = null; /* fall through to disk read */ }
+  }
   try {
-    const data = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8'));
-    return data;
+    _registryJson = fs.readFileSync(REGISTRY_FILE, 'utf8');
+    return JSON.parse(_registryJson);
   } catch (e) {
     console.log(`[registry] Could not load ${REGISTRY_FILE} — initializing empty: ${e.message}`);
     return { groups: {}, devices: {}, players: {}, events: {} };
@@ -89,7 +98,8 @@ function loadRegistry() {
 
 function saveRegistry(reg) {
   try {
-    fs.writeFileSync(REGISTRY_FILE, JSON.stringify(reg, null, 2));
+    _registryJson = JSON.stringify(reg, null, 2);
+    fs.writeFileSync(REGISTRY_FILE, _registryJson);
     const deviceCount = Object.keys(reg.devices || {}).length;
     console.log(`[registry] Saved to ${REGISTRY_FILE} — ${deviceCount} device(s)`);
   } catch (e) {
@@ -3559,8 +3569,10 @@ function sacnInputCode(value) {
 async function getSacnSession(mac) {
   const existing = sacnSessions.get(mac);
   if (existing) {
-    // Verify session is still alive
-    try { await existing.session.vcpGet(existing.monitorId, 0x00, 0xD6); return existing; }
+    // Verify session is still alive (with timeout to avoid hanging on half-open sockets)
+    const probe   = existing.session.vcpGet(existing.monitorId, 0x00, 0xD6);
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('probe timeout')), 3000));
+    try { await Promise.race([probe, timeout]); return existing; }
     catch { sacnSessions.delete(mac); }
   }
   const reg    = loadRegistry();
@@ -3675,6 +3687,9 @@ async function sacnHandleVcp(mac, dmx) {
  * 2+ active → hold (crossfade in progress)
  */
 async function sacnHandleFolders(mac, dmx) {
+  const st = sacnState.get(mac);
+  if (st?.playing) { log('debug', `[sACN] play in progress for ${mac}, skipping`); return; }
+
   const reg    = loadRegistry();
   const device = reg.devices?.[mac];
   if (!device) return;
@@ -3711,7 +3726,12 @@ async function sacnHandleFolders(mac, dmx) {
       return;
     }
 
+    if (!st?.showMode) {
+      log('warn', `[sACN] ${mac} folder fader active but CH1 (show mode) is OFF — scheduler may override`);
+    }
+
     log('info', `[sACN] ${mac} → folder "${folder.name}" (ch ${folder.channel})`);
+    if (st) st.playing = true;
     try {
       // Extract actual folder name from folderPath (e.g. "/mnt/usb1/My Folder" → "My Folder")
       // This ensures we search for the correct name in the player's filelist
@@ -3724,10 +3744,14 @@ async function sacnHandleFolders(mac, dmx) {
 
       log('debug', `[sACN] playFolder: display="${folder.name}" actual="${actualFolderName}" path="${folder.folderPath}"`);
       await playFolder(device.tvIp, actualFolderName, null, 1);
-      reg.devices[mac].autoplay = folder.name;
-      saveRegistry(reg);
+      // Re-load registry after play (may have been modified by scheduler/API during the ~8s play)
+      const freshReg = loadRegistry();
+      freshReg.devices[mac].autoplay = folder.name;
+      saveRegistry(freshReg);
     } catch (e) {
       log('warn', `[sACN] playFolder failed for ${mac}: ${e.message}`);
+    } finally {
+      if (st) st.playing = false;
     }
     return;
   }
@@ -3758,8 +3782,11 @@ async function sacnStopPlayback(mac, inputChannelValue) {
   try {
     const { session: s, monitorId: mid } = await getSacnSession(mac);
     await s.vcpSet(mid, 0x00, 0x60, inputCode);
-    reg.devices[mac].autoplay = null;
-    saveRegistry(reg);
+    const freshReg = loadRegistry();
+    if (freshReg.devices?.[mac]) {
+      freshReg.devices[mac].autoplay = null;
+      saveRegistry(freshReg);
+    }
   } catch (e) { log('warn', `[sACN] stop input switch failed: ${e.message}`); }
 }
 
