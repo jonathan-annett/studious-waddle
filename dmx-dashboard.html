@@ -407,6 +407,7 @@ let deviceMac   = null;
 let deviceTvIp  = null;
 let sessionId   = null;
 let folders     = [];     // [{ channel, name, folderPath, groupId? }]
+let folderAssetHashes = [];
 let tempFolders = [];     // [{ name, displayName }]
 let uploadFiles = [];
 let ws          = null;
@@ -478,7 +479,7 @@ async function boot() {
   } catch {}
 
   initWs();
-  startVcpPoll();  // Poll VCP state every 10s to catch manual changes via IR/web UI
+ //startVcpPoll();  // Poll VCP state every 10s to catch manual changes via IR/web UI
   window.addEventListener('beforeunload', cleanup);
 }
 
@@ -655,16 +656,19 @@ async function loadFolders() {
     const r = await fetch('/api/player/folders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tvIP: deviceTvIp }),
+      body: JSON.stringify({ tvIP: deviceTvIp, assetHash: true }),
     }).then(x => x.json());
+
+    console.log ({r});
 
     // Convert player folder names to dashboard folder objects
     // Assign sequential DMX channels starting from 101
     folders = (r.folders ?? []).map((name, idx) => ({
       channel: 101 + idx,
       name: name,
-      folderPath: name,  // Player API returns just folder names
+      folderPath: name  // Player API returns just folder names
     }));
+    folderAssetHashes = r.assetHashes ?? [];
     console.log('[loadFolders] Loaded %d folders: %O', folders.length, folders);
   } catch(e) {
     console.warn('[loadFolders] Failed:', e);
@@ -696,27 +700,17 @@ function renderFolderGrid() {
   }).join('');
 
   // Load thumbnails asynchronously
-  for (const f of folders) loadFolderThumb(f);
+  let ix = 0;
+  for (const f of folders) {
+      loadFolderThumb(f,folderAssetHashes[ix]); 
+      ix++;
+  };
 }
 
-async function loadFolderThumb(folder) {
+async function loadFolderThumb(folder,assetHash) {
   // Find first asset hash via groupId if available
-  if (!folder.groupId) return;
-  try {
-    const r = await fetch('/api/cache').then(x => x.json());
-    // Find assets in this group by cross-referencing registry
-    const reg = await fetch('/api/events').then(x => x.json()).catch(() => null);
-    // Simpler: just get list of all cache items and try thumbs for them
-    // For groups, the main UI already knows the assets — use the group's first asset
-    const allItems = r.items ?? [];
-    // We don't have direct group→asset mapping in this page, so try the first cached image
-    if (allItems.length) {
-      const firstImage = allItems.find(it => /image/i.test(it.mime));
-      if (firstImage) {
-        await setFolderThumb(folder.channel, firstImage.hash);
-      }
-    }
-  } catch {}
+  if (!assetHash)  return;
+  await setFolderThumb(folder.channel, assetHash);  
 }
 
 async function setFolderThumb(channel, hash) {
@@ -882,6 +876,7 @@ async function loadVcpState() {
   }
 }
 
+/*
 function startVcpPoll() {
   if (vcpPollHandle) clearInterval(vcpPollHandle);
   // Poll every 10 seconds, but only in manual mode (not console mode)
@@ -889,6 +884,7 @@ function startVcpPoll() {
     if (!consoleMode) loadVcpState().catch(() => {});
   }, 10000);
 }
+*/
 
 // ── Temp folders ───────────────────────────────────────────────────────────
 async function loadTempFolders() {
