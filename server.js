@@ -1285,11 +1285,11 @@ async function handleApi(method, pathname, body, req) {
   // POST /api/player/filelist  { tvIP, folder }
   // Returns the file count and names inside a named folder on the player SD card.
   if (method === 'POST' && pathname === '/api/player/filelist') {
-    const { tvIP, folder } = body;
+    const { tvIP, folder, assetHash } = body;
     if (!tvIP)   return { error: 'tvIP required' };
     if (!folder) return { error: 'folder required' };
     const playerIP = await getPlayerIP(tvIP);
-    const result   = await getPlayerFolderContents(playerIP, folder);
+    const result   = await getPlayerFolderContents(playerIP, folder, assetHash);
     return { ok: true, playerIP, folder, ...result };
   }
 
@@ -1367,7 +1367,7 @@ async function handleApi(method, pathname, body, req) {
   // POST /api/player/folders  { tvIP }
   // Returns the list of top-level folder names on the media player SD card.
   if (method === 'POST' && pathname === '/api/player/folders') {
-    const { tvIP } = body;
+    const { tvIP, assetHash } = body;
     if (!tvIP) return { error: 'tvIP required' };
     const playerIP = await getPlayerIP(tvIP);
     // Enter file manager mode (required before filelist.json is accessible)
@@ -1381,7 +1381,23 @@ async function handleApi(method, pathname, body, req) {
     const folders = (list.fileinfo || [])
       .filter(f => f.name !== '..' && f.type === 0)
       .map(f => f.name);
-    return { ok: true, playerIP, folders };
+
+
+    const subFolders = [];
+    
+    for (const folder of folders) {
+        const key = `${playerIP}/${folder}`;
+        if ( sha256FromPlayerFolderNameCache.has ( key ))  {
+            subFolders.push(  sha256FromPlayerFolderNameCache.get ( key ) );
+            continue;
+        }
+        const sha256 = await getPlayerFolderContents(playerIP,folder,true);
+        sha256FromPlayerFolderNameCache.set ( key, sha256 );
+        subFolders.push( sha256 );        
+    }
+
+    return { ok: true, playerIP, folders, assetHashes : subFolders.map( x=>x.assetHash ) };
+
   }
 
   // GET /api/cache  — list all cached assets (reads sidecars)
@@ -3037,6 +3053,42 @@ function cacheDisplayName(originalName, sha256) {
 function cacheSidecarPath(sha256)  { return path.join(CACHE_DIR, sha256 + '.json'); }
 function cacheFilePath(sha256, ext) { return path.join(CACHE_DIR, sha256 + ext); }
 
+const sha256FromDisplayNameCache = new Map();
+async function sha256FromDisplayName (disp) {
+ 
+  if (sha256FromDisplayNameCache.has(disp)) {
+    const sha256 = sha256FromDisplayNameCache.get(disp);
+      console.log({disp,sha256});
+    return sha256;
+  }
+    const hashFragment = path.basename(disp,path.extname(disp)).split(' ').pop();
+
+    const files = await fs.promises.readdir(CACHE_DIR);
+    const filtered = files.filter( f=> f.endsWith('.json'));
+    for (const f of filtered) {
+       if (!hashFragment || f.includes(hashFragment)) {
+        const json = await fs.promises.readFile(path.join(CACHE_DIR,f),'utf-8');
+        const { originalName, displayName, sha256 } = JSON.parse(json);
+        if (displayName === disp) {
+             const sidecarPath = cacheSidecarPath(sha256) ;
+             sha256FromDisplayNameCache.set(disp,sha256); 
+             console.log({disp,sha256});
+            return sha256 ;
+        }
+      }
+    }
+  
+ 
+}
+const sha256FromPlayerFolderNameCache = new Map();
+async function sha256FromPlayerFolderName (playerIP,folderName) {
+   const key = `${playerIP}/${folderName}`;
+   if (sha256FromPlayerFolderNameCache.has(key)) {
+      return sha256FromPlayerFolderNameCache.get(key);
+   }
+
+}
+
 async function cacheStore(data, originalName, mime) {
   const sha256      = crypto.createHash('sha256').update(data).digest('hex');
   const ext         = path.extname(originalName) || '';
@@ -3057,6 +3109,10 @@ async function cacheStore(data, originalName, mime) {
   }
   await fs.promises.writeFile(sidecarPath, JSON.stringify(meta, null, 2));
   log('info', `Cached ${displayName} (${data.length} bytes) sha256=${sha256.slice(0,16)}…`);
+ 
+  // update the in-memory map of displayNames to sha256
+  sha256FromDisplayNameCache.set (displayName,sha256);
+
   return { hash: sha256, displayName, originalName, size: data.length, mime };
 }
 
@@ -3292,10 +3348,15 @@ async function pushGroupToPlayer(tvIP, folderName, files) {
 
   // 5. Upload all files in order
   const uploaded = [];
-  for (const { filename, mime, data } of files) {
+  let first = true;
+  for (const { filename, mime, data, sha256 } of files) {
     log('info', `[push] Uploading ${filename} (${data.length} bytes)…`);
     await uploadFileToPlayer(playerIP, data, filename, mime);
     uploaded.push({ filename, bytes: data.length });
+    if (first) {
+      sha256FromPlayerFolderNameCache.set(`${playerIP}/${folderName}`,sha256);
+      first = false;
+    }
   }
 
   // 6. RSG finalise — restarts player so it picks up the new folder contents
@@ -3365,7 +3426,7 @@ async function restartPlayer(playerIP) {
  * Returns { fileCount, files } where files is the raw fileinfo array.
  * Navigates into the folder by index from root listing.
  */
-async function getPlayerFolderContents(playerIP, folder) {
+async function getPlayerFolderContents(playerIP, folder, getAssetHash) {
   // Enter file manager mode (required before filelist.json is accessible)
   await enterFileManager(playerIP);
   // Go to root
@@ -3408,8 +3469,12 @@ async function getPlayerFolderContents(playerIP, folder) {
   await playerRequest(playerIP, `/cgi-bin/cgictrl?FL=-01`, 'POST');
 
   const files = (list.fileinfo || []).filter(f => f.name !== '..' && f.type !== 0);
-  return { fileCount: files.length, files };
+
+  return { fileCount: files.length, files, assetHash : files.length === 0 || !getAssetHash ?  null :   await sha256FromDisplayName (files[0].name) };
 }
+
+
+
 
 /**
  * Full "play this folder" flow:
