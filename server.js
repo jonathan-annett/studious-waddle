@@ -3288,11 +3288,15 @@ async function pushEventGroup(tvIP, group, reg) {
       const ext = path.extname(meta.originalName);
       const filePath = path.join(CACHE_DIR, hash + ext);
       const data = await fs.promises.readFile(filePath);
+
+      await generateThumbnail(hash, ext);
+
       files.push({
         filename: meta.originalName,
         mime: meta.mime,
         data,
       });
+      
     } catch (e) {
       log('warn', `[event-push] Failed to read asset ${hash}: ${e.message}`);
       continue;
@@ -3376,7 +3380,7 @@ const INTERVAL_INFINITE   = 99999; // firmware accepts up to 99999s (~27hrs)
 const INTERVAL_DEFAULT    = 30;
 
 // ─── sACN constants are imported from sacn.js ──────────────────────────────────
-const FFMPEG_PATH            = '/usr/bin/ffmpeg';
+const FFMPEG_PATH            = '/root/ffmpeg_static/ffmpeg';
 const THUMB_DIR              = path.join(CACHE_DIR, 'thumbs');
 
 /**
@@ -3590,6 +3594,7 @@ function hex(n) { return '0x' + n.toString(16).toUpperCase().padStart(2, '0'); }
 function generateThumbnail(hash, ext) {
   const src  = cacheFilePath(hash, ext);
   const dest = path.join(THUMB_DIR, hash + '.jpg');
+
   return new Promise(resolve => {
     // Already generated
     if (fs.existsSync(dest)) { resolve(dest); return; }
@@ -3606,6 +3611,8 @@ function generateThumbnail(hash, ext) {
         resolve(dest);
       } else {
         if (code !== 0) log('info', `[thumb] ffmpeg exit ${code} for ${hash}${ext} (H.264 expected)`);
+
+        console.log (FFMPEG_PATH, args.join(' '),':', 'failed');
         resolve(null);
       }
     });
