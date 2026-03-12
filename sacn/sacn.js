@@ -511,3 +511,56 @@ export function createHandlers(deps) {
 
   return { handleEnable, handleVcp, handleFolders, stopPlayback, receive };
 }
+
+
+
+/**
+ * Constructs a strict E1.31 (sACN) network packet
+ */
+/**
+ * Constructs a strict E1.31 (sACN) network packet
+ */
+/**
+ * Constructs a strict E1.31 (sACN) network packet
+ */
+export function buildSacnPacket(universe, sequence, sourceName, dmxData) {
+    const buffer = Buffer.alloc(638);
+    buffer.fill(0);
+
+    // --- Root Layer ---
+    buffer.writeUInt16BE(0x0010, 0); // Preamble Size
+    buffer.writeUInt16BE(0x0000, 2); // Post-amble Size
+    Buffer.from([0x41, 0x53, 0x43, 0x4e, 0x45, 0x31, 0x2e, 0x31, 0x00, 0x00, 0x00, 0x00]).copy(buffer, 4); 
+    buffer.writeUInt16BE(0x726e, 16); // Flags and Length
+    buffer.writeUInt32BE(0x00000004, 18); // Vector
+    
+    // FIX: Use a proper 16-byte hex UUID array instead of an ASCII string for strict parsers
+    const cid = [0x9e, 0x4c, 0x71, 0x38, 0x8a, 0x5d, 0x4b, 0x9c, 0x8f, 0x1a, 0xd2, 0x6e, 0x55, 0x44, 0x33, 0x22];
+    Buffer.from(cid).copy(buffer, 22);
+
+    // --- Framing Layer ---
+    buffer.writeUInt16BE(0x7258, 38); 
+    buffer.writeUInt32BE(0x00000002, 40); 
+    Buffer.from(sourceName.substring(0, 63)).copy(buffer, 44); 
+    buffer.writeUInt8(100, 108); // Priority
+    buffer.writeUInt16BE(0x0000, 109); // Sync Address
+    buffer.writeUInt8(sequence, 111); // Sequence Number
+    buffer.writeUInt8(0x00, 112); // Options
+    buffer.writeUInt16BE(universe, 113); // Target Universe
+
+    // --- DMP Layer ---
+    buffer.writeUInt16BE(0x720b, 115); 
+    buffer.writeUInt8(0x02, 117); 
+    buffer.writeUInt8(0xa1, 118); 
+    buffer.writeUInt16BE(0x0000, 119); 
+    buffer.writeUInt16BE(0x0001, 121); 
+    buffer.writeUInt16BE(0x0201, 123); 
+    buffer.writeUInt8(0x00, 125); // Start Code
+
+    // --- DMX Payload ---
+    for (let i = 0; i < 512; i++) {
+        buffer.writeUInt8(dmxData[i] || 0, 126 + i);
+    }
+
+    return buffer;
+}

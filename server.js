@@ -3740,6 +3740,18 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+   // Serve test page
+  if (method === 'GET' && /^\/faders/) {
+    try {
+      const html = fs.readFileSync(new URL('./faders.html', import.meta.url));
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch {
+      res.writeHead(500); res.end('faders.html not found');
+    }
+    return;
+  }
+
   // GET /api/cache/:hash/file — stream the raw cached file (for thumbnails / preview)
   if (method === 'GET' && /^\/api\/cache\/[0-9a-f]{64}\/file$/.test(path)) {
     const hash = path.split('/')[3];
