@@ -7,7 +7,7 @@
     "start": "node server.js",
     "build": "webpack",
     "dev": "pm2 start ecosystem.config.cjs",
-    "dev-restart" : "pm2 restart ecosystem.config.cjs --only sacn-hub --env development --update-env",
+    "dev-restart": "pm2 restart ecosystem.config.cjs --only sacn-hub --env development --update-env",
     "prod": "npm run build && pm2 restart ecosystem.config.cjs --only sacn-hub --env production --update-env",
     "stop": "pm2 stop all",
     "logs": "pm2 logs"
@@ -17,7 +17,9 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "cookie-parser": "^1.4.7",
     "express": "^5.2.1",
+    "qrcode": "^1.5.4",
     "sharp": "^0.34.5",
     "ws": "^8.19.0"
   },

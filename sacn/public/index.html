@@ -4,7 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DMX Console</title>
-    <script src="qrcode.min.js"></script>
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#1e1e2e">
+    <script src="./qrcode.min.js"></script>
     <style>
         body {
             background-color: #11111b; /* Matches the dark theme */
@@ -106,7 +108,7 @@
         <pre id="network-log"></pre>
     </div>
 
-    <script src="/dmx-console.js"></script>
-    <script src="/app.js"></script>
+    <script src="./dmx-console.js"></script>
+    <script src="./app.js"></script>
 </body>
 </html>
