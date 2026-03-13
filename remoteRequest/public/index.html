@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>L7 Tunnel Diagnostic Suite</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; background: #1e1e1e; color: #ddd; max-width: 900px; margin: 2rem auto; }
+        h1 { color: #fff; border-bottom: 1px solid #444; padding-bottom: 10px; }
+        .controls { margin-bottom: 20px; display: flex; gap: 10px; align-items: center; }
+        button { background: #0d6efd; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 16px; }
+        button:hover { background: #0b5ed7; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; background: #2a2a2a; border-radius: 8px; overflow: hidden; }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #444; }
+        th { background: #333; color: #fff; text-transform: uppercase; font-size: 14px; }
+        tr:last-child td { border-bottom: none; }
+        
+        .status { font-weight: bold; display: inline-block; width: 80px; }
+        .pending { color: #f0ad4e; }
+        .pass { color: #198754; }
+        .fail { color: #dc3545; }
+        .metric { font-family: monospace; color: #0dcaf0; }
+        
+        #log { margin-top: 20px; background: #111; padding: 15px; border-radius: 5px; font-family: monospace; font-size: 13px; height: 200px; overflow-y: auto; color: #aaa; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+
+    <h1>L7 Multiplexer Diagnostic</h1>
+    
+    <div class="controls">
+        <button id="runBtn" onclick="runAllTests()">Run Full Diagnostic</button>
+        <span id="overallStatus">Ready.</span>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Test</th>
+                <th>Status</th>
+                <th>Latency (RTT)</th>
+                <th>Details</th>
+            </tr>
+        </thead>
+        <tbody id="testTable">
+            </tbody>
+    </table>
+
+    <div id="log">System initialized. Awaiting test execution...</div>
+
+    <script>
+        const UI = {
+            table: document.getElementById('testTable'),
+            log: document.getElementById('log'),
+            btn: document.getElementById('runBtn'),
+            status: document.getElementById('overallStatus')
+        };
+
+        function printLog(msg) {
+            const time = new Date().toISOString().split('T')[1].slice(0, -1);
+            UI.log.textContent += `\n[${time}] ${msg}`;
+            UI.log.scrollTop = UI.log.scrollHeight;
+        }
+
+        function createRow(id, name) {
+            const tr = document.createElement('tr');
+            tr.id = `row-${id}`;
+            tr.innerHTML = `
+                <td>${name}</td>
+                <td class="status pending" id="status-${id}">WAITING</td>
+                <td class="metric" id="metric-${id}">-</td>
+                <td id="detail-${id}">-</td>
+            `;
+            UI.table.appendChild(tr);
+            return id;
+        }
+
+        function updateRow(id, status, metric, details) {
+            const statusEl = document.getElementById(`status-${id}`);
+            statusEl.textContent = status.toUpperCase();
+            statusEl.className = `status ${status.toLowerCase()}`;
+            document.getElementById(`metric-${id}`).textContent = metric ? `${metric} ms` : '-';
+            document.getElementById(`detail-${id}`).textContent = details;
+        }
+
+        // --- THE TEST SUITE ---
+
+        async function testHttpGetJson(id) {
+            printLog('Starting HTTP GET (JSON) test...');
+            const start = performance.now();
+            const res = await fetch('./api/ping');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            const time = Math.round(performance.now() - start);
+            
+            if (!data.status) throw new Error("Invalid payload format");
+            updateRow(id, 'PASS', time, `Parsed JSON object. Server time: ${data.time}`);
+            printLog(`HTTP GET passed in ${time}ms.`);
+        }
+
+        async function testHttpStaticBinary(id) {
+            printLog('Starting HTTP Static Binary (Image) test...');
+            const start = performance.now();
+            // Append cache buster so we actually test the tunnel, not the browser cache
+            const res = await fetch('./sample1.jpg?cb=' + Date.now()); 
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const blob = await res.blob();
+            const time = Math.round(performance.now() - start);
+            
+            if (blob.size === 0) throw new Error("Received empty blob");
+            updateRow(id, 'PASS', time, `Downloaded ${blob.size} bytes (${blob.type})`);
+            printLog(`HTTP Binary passed in ${time}ms.`);
+        }
+
+        async function testHttpPostMultipart(id) {
+            printLog('Starting HTTP POST (Multipart) test...');
+            
+            // Generate a dummy 500KB file to test stream buffering
+            const dummyData = new Uint8Array(500 * 1024); 
+            
+            // FIX: Fill the array with a random byte instead of using the capped crypto API
+            dummyData.fill(Math.floor(Math.random() * 256));
+            
+            const blob = new Blob([dummyData], { type: 'application/octet-stream' });
+            
+            const formData = new FormData();
+            formData.append('testFile', blob, 'random.bin');
+
+            const start = performance.now();
+            const res = await fetch('./api/upload', { method: 'POST', body: formData });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            const time = Math.round(performance.now() - start);
+            
+            updateRow(id, 'PASS', time, `Uploaded ${data.size} bytes successfully`);
+            printLog(`HTTP POST passed in ${time}ms.`);
+        }
+        async function testWebSocketMultiplex(id) {
+            printLog('Starting WebSocket Multiplexing test...');
+            return new Promise((resolve, reject) => {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const basePath = window.location.pathname.replace(/\/[^\/]*$/, '');
+                const wsUrl = protocol + '//' + window.location.host + basePath + '/ws-endpoint';
+
+                const start = performance.now();
+                const ws = new WebSocket(wsUrl);
+                
+                // Set a strict 5 second timeout for the entire WS cycle
+                const timeout = setTimeout(() => {
+                    ws.close();
+                    reject(new Error("WebSocket test timed out after 5000ms"));
+                }, 5000);
+
+                let connectionTime = 0;
+                let testPhase = 0; 
+                const testString = "TUNNEL_PING_" + Date.now();
+
+                ws.onopen = () => {
+                    connectionTime = Math.round(performance.now() - start);
+                    printLog(`WS Connected in ${connectionTime}ms. Sending text frame...`);
+                    ws.send(testString);
+                };
+
+                ws.onmessage = async (e) => {
+                    if (testPhase === 0) {
+                        // Phase 0: Expecting the "System joined" message from the server
+                        if (typeof e.data === 'string' && e.data.includes('[System]')) {
+                            testPhase = 1;
+                        }
+                    } 
+                    else if (testPhase === 1) {
+                        // Phase 1: Expecting our echoed text string back
+                        if (typeof e.data === 'string' && e.data.includes(testString)) {
+                            const rtt = Math.round(performance.now() - start - connectionTime);
+                            printLog(`WS Text Echo received (RTT: ${rtt}ms). Sending binary frame...`);
+                            testPhase = 2;
+                            // Send a small binary buffer
+                            ws.send(new Uint8Array([1, 2, 3, 4, 5]));
+                        } else {
+                            clearTimeout(timeout);
+                            reject(new Error("Received unexpected WS text payload"));
+                        }
+                    }
+                    else if (testPhase === 2) {
+                        // Phase 2: Expecting binary data back
+                        // Note: Our local Express server stringifies the buffer before broadcasting, 
+                        // so we check if it survived the round trip.
+                        clearTimeout(timeout);
+                        const totalTime = Math.round(performance.now() - start);
+                        ws.close();
+                        updateRow(id, 'PASS', totalTime, `Full duplex achieved. Connect: ${connectionTime}ms`);
+                        printLog(`WebSocket cycle completed successfully in ${totalTime}ms.`);
+                        resolve();
+                    }
+                };
+
+                ws.onerror = (err) => {
+                    clearTimeout(timeout);
+                    reject(new Error("WebSocket Native Error"));
+                };
+            });
+        }
+
+        // --- TEST RUNNER ---
+
+        const tests = [
+            { name: "HTTP GET API (JSON)", fn: testHttpGetJson },
+            { name: "HTTP GET Static (Binary Chunking)", fn: testHttpStaticBinary },
+            { name: "HTTP POST Multipart (Upload Streams)", fn: testHttpPostMultipart },
+            { name: "WebSocket (Upgrade & Multiplexing)", fn: testWebSocketMultiplex }
+        ];
+
+        async function runAllTests() {
+            UI.btn.disabled = true;
+            UI.table.innerHTML = '';
+            UI.log.textContent = '--- Starting Full Diagnostic Run ---\n';
+            UI.status.textContent = "Running tests...";
+            UI.status.style.color = "#f0ad4e";
+
+            let allPassed = true;
+
+            for (let i = 0; i < tests.length; i++) {
+                const id = createRow(i, tests[i].name);
+                try {
+                    await tests[i].fn(id);
+                } catch (err) {
+                    allPassed = false;
+                    updateRow(id, 'FAIL', null, err.message);
+                    printLog(`[ERROR] ${tests[i].name} failed: ${err.message}`);
+                }
+            }
+
+            UI.btn.disabled = false;
+            UI.status.textContent = allPassed ? "All Systems Operational." : "Diagnostic Failed.";
+            UI.status.style.color = allPassed ? "#198754" : "#dc3545";
+            printLog('--- Diagnostic Run Complete ---');
+        }
+    </script>
+</body>
+</html>
