@@ -43,7 +43,7 @@ import {
   leaveUniverse,
   SacnStateManager,
   createHandlers,
-} from './sacn.js';
+} from './sacn/sacn.js';
 
 const PORT        = parseInt(process.argv[2] ?? '3000', 10);
 const PROJECT_DIR = path.dirname(new URL(import.meta.url).pathname);
