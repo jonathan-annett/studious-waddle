@@ -2,5 +2,12 @@ cache/
 .pin
 node_modules
 streamdeck-gateway/node_modules
+sacn/node_modules
+remoteRequest/node_modules
 min/
 .vscode/settings.json
+
+# Runtime secrets and session data
+sacn/config.json
+sacn/sessions.json
+remoteRequest/session.json

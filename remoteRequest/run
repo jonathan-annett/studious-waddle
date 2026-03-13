@@ -1,16 +1,9 @@
 #!/bin/bash
-export RELAY_BACKEND="local-express-server"
 
-[[ -f ./remoteRequest.js ]] && rm ./remoteRequest.js
-[[ -f ./${RELAY_BACKEND}.js ]] && rm ./${RELAY_BACKEND}.js
+pm2 stop "Relay Server"
+pm2 delete "Relay Server"
+pm2 flush "Relay Server"
+pm2 start $PWD/server.js --name "Relay Server"
+pm2 save
+pm2 logs "Relay Server"
 
-wget https://dev-drop.sophtwhere.com/remoteRequest.js
-wget https://dev-drop.sophtwhere.com/${RELAY_BACKEND}.js
-ls -al ./remoteRequest.js
-
-
-RELAY_ROOT_PATH="/test-dashboard" \
-RELAY_HOST="dev-drop.sophtwhere.com" \
-RELAY_ROOT="/home/jonathan/projects/relay-poc" \
-RELAY_USER="jonathan" \
-node ./${RELAY_BACKEND}.js 

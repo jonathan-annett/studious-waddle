@@ -9,6 +9,8 @@ import fs from 'fs';
 
 import { publicServerExpressTunnel } from './remoteRequest.js';
 
+import {readCert} from '../../relay-poc/certs.js';
+
 // ESM Fix for otplib
 const require = createRequire(import.meta.url);
 const { authenticator } = require('otplib');
@@ -20,12 +22,6 @@ const app = express();
 const requests = new Map();
 const contentHashes = new Map();
 const sockets = new Map();
-
-const auth = createHash('sha256').update(process.argv[1]).digest('base64url');
-const readCert = async (fn) => {
-    const r = await fetch('http://localhost:9999/' + fn, { headers: { 'x-auth': auth } });
-    return await r.text();
-};
 
 const httpsOptions = {
     cert: await readCert('cert.pem'),

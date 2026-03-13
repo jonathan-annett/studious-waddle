@@ -12,8 +12,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const wss_domain = process.env.RELAY_HOST || 'dev-drop.sophtwhere.com';
-const rootPath = process.env.RELAY_ROOT_PATH || '/the-venue-club'; 
-const LOCAL_WS_PORT = 8080;
+const rootPath = process.env.RELAY_ROOT_PATH || '/the-venue-club';
+const LOCAL_WS_PORT = parseInt(process.env.LOCAL_WS_PORT || '8080', 10);
+const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || 'venue_session';
+const AUTH_PASSWORD = process.env.AUTH_PASSWORD || 'demo';
 
 const app = express();
 
@@ -71,8 +73,9 @@ app.get(rootPath + '/gateway/join', (req, res) => {
     }
     magicTokens.delete(token);
 
-    // Issue the cookie for the current domain (usually the public tunnel)
-    res.cookie('venue_auth', 'stagehand123', { maxAge: 86400000, httpOnly: true });
+    // Issue the auth cookie for the current domain
+    const sessionValue = crypto.randomBytes(16).toString('base64url');
+    res.cookie(AUTH_COOKIE_NAME, sessionValue, { maxAge: 86400000, httpOnly: true });
 
     // Generate a secure Handoff Token just in case they pivot to the LAN
     const handoffToken = crypto.randomBytes(8).toString('hex');
@@ -136,8 +139,9 @@ app.get(rootPath + '/gateway/claim', (req, res) => {
     // Verify the handoff token from the tunnel
     if (magicTokens.has(token) && magicTokens.get(token).expires > Date.now()) {
         magicTokens.delete(token);
-        // Issue the cookie for the LOCAL LAN domain
-        res.cookie('venue_auth', 'stagehand123', { maxAge: 86400000, httpOnly: true });
+        // Issue the auth cookie for the LOCAL LAN domain
+        const sessionValue = crypto.randomBytes(16).toString('base64url');
+        res.cookie(AUTH_COOKIE_NAME, sessionValue, { maxAge: 86400000, httpOnly: true });
         res.redirect(rootPath + '/index.html');
     } else {
         res.redirect(rootPath + '/login');
@@ -151,7 +155,7 @@ const localWss = new WebSocketServer({
     verifyClient: (info, callback) => {
         // EVERYONE must have a cookie, local or remote.
         const cookieStr = info.req.headers.cookie || '';
-        if (cookieStr.includes('venue_auth=stagehand123')) return callback(true); 
+        if (cookieStr.includes(AUTH_COOKIE_NAME + '=')) return callback(true);
         
         console.log(`[WSS Security] Blocked unauthenticated connection from ${info.req.socket.remoteAddress}`);
         callback(false, 401, 'Unauthorized');
@@ -182,7 +186,7 @@ app.use((req, res, next) => {
     }
 
     // 2. Everyone else must be authenticated
-    if (req.cookies['venue_auth'] === 'stagehand123') return next();
+    if (req.cookies[AUTH_COOKIE_NAME]) return next();
 
     // 3. Reject
     if (req.path.startsWith(rootPath + '/api/')) {
@@ -208,7 +212,7 @@ app.get(rootPath + '/login', (req, res) => {
 });
 
 app.post(rootPath + '/login', (req, res) => {
-    if (req.body.password === 'demo') { 
+    if (req.body.password === AUTH_PASSWORD) {
         // Feed manual log-ins right into the Smart Gateway flow!
         const token = crypto.randomBytes(8).toString('hex');
         magicTokens.set(token, { expires: Date.now() + 60000 });
