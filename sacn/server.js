@@ -10,8 +10,10 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import cookieParser from 'cookie-parser';
 
-import { localServerExpressTunnel } from '../../remoteRequest/remoteRequest.js'; 
+import { localServerExpressTunnel } from '../../remoteRequest/remoteRequest.js';
 import { parseSacnPacket, sacnMulticastAddr, buildSacnPacket } from './sacn.js';
+import { config, saveConfig } from './config.js';
+import * as auth from './auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,42 +21,40 @@ const __dirname = path.dirname(__filename);
 const isProd = process.env.NODE_ENV === 'production';
 const staticDir = isProd ? path.join(__dirname, 'dist') : path.join(__dirname, 'public');
 
+// Initialize auth module (generates secrets on first boot if needed)
+auth.init(config, saveConfig);
+
 const app = express();
 const server = http.createServer(app);
-const PORT = 4004;
-
-const wss_domain = process.env.RELAY_HOST || 'dev-drop.sophtwhere.com';
-const rootPath = process.env.RELAY_ROOT_PATH || '/the-venue-club'; 
-const SECURITY_TIER = 2; 
-
-const STATE_FILE = path.join(__dirname, 'dmx-state.json');
-const PRESETS_FILE = path.join(__dirname, 'dmx-presets.json');
-const WHITELIST_FILE = path.join(__dirname, 'whitelist.json');
+const { port: PORT, relayHost: wss_domain, rootPath } = config;
 
 app.use(cookieParser());
 app.use(express.urlencoded({ extended: true }));
 
 let whitelist = [];
-if (fs.existsSync(WHITELIST_FILE)) {
-    whitelist = JSON.parse(fs.readFileSync(WHITELIST_FILE, 'utf8'));
+if (fs.existsSync(config.whitelistFile)) {
+    whitelist = JSON.parse(fs.readFileSync(config.whitelistFile, 'utf8'));
 } else {
     whitelist = ["127.0.0.1", "::1", "::ffff:127.0.0.1"];
-    fs.writeFileSync(WHITELIST_FILE, JSON.stringify(whitelist, null, 2));
+    fs.writeFileSync(config.whitelistFile, JSON.stringify(whitelist, null, 2));
 }
 
 const totalChannels = 512;
-const activeUniverses = new Map(); 
-const joinedMulticastGroups = new Set(); 
+const activeUniverses = new Map();
+const joinedMulticastGroups = new Set();
 const magicTokens = new Map();
 
+// Periodic cleanup of expired magic tokens
+setInterval(() => auth.cleanupExpiredTokens(magicTokens), config.magicTokenCleanupInterval);
+
 let environmentPresets = {};
-if (fs.existsSync(PRESETS_FILE)) {
-    try { environmentPresets = JSON.parse(fs.readFileSync(PRESETS_FILE, 'utf8')); } 
+if (fs.existsSync(config.presetsFile)) {
+    try { environmentPresets = JSON.parse(fs.readFileSync(config.presetsFile, 'utf8')); }
     catch (err) {}
 }
 
 function savePresetsToDisk() {
-    fs.writeFile(PRESETS_FILE, JSON.stringify(environmentPresets), () => {});
+    fs.writeFileSync(config.presetsFile, JSON.stringify(environmentPresets));
 }
 
 function broadcastPresetList(deviceName, state) {
@@ -67,27 +67,27 @@ function createEmptyState() {
     return {
         values: new Array(totalChannels).fill(0), enabled: new Array(totalChannels).fill(true),
         protected: new Array(totalChannels).fill(false), names: new Array(totalChannels).fill(''),
-        defaultNames: new Array(totalChannels).fill(''), glyphs: new Array(totalChannels).fill(''), 
+        defaultNames: new Array(totalChannels).fill(''), glyphs: new Array(totalChannels).fill(''),
         customLayout: [], customLayoutName: 'CUSTOM LAYOUT', serverLayout: null,
-        radioGroups: [], radioColors: new Array(totalChannels).fill(''), lastRadioState: {}, 
+        radioGroups: [], radioColors: new Array(totalChannels).fill(''), lastRadioState: {},
         history: new Array(totalChannels).fill(null).map(() => []), uiClients: new Set(),
         universeId: null, relayUniverse: null, relaySequence: 0, backendClient: null
     };
 }
 
-if (fs.existsSync(STATE_FILE)) {
+if (fs.existsSync(config.stateFile)) {
     try {
-        const savedData = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+        const savedData = JSON.parse(fs.readFileSync(config.stateFile, 'utf8'));
         if (savedData.values && Array.isArray(savedData.values)) {
             const defaultState = createEmptyState();
             Object.assign(defaultState, savedData);
-            defaultState.universeId = 9999; 
+            defaultState.universeId = 9999;
             activeUniverses.set('default', defaultState);
         } else {
             for (const [name, data] of Object.entries(savedData)) {
                 const state = createEmptyState();
                 Object.assign(state, data);
-                if (name === 'default') state.universeId = 9999; 
+                if (name === 'default') state.universeId = 9999;
                 activeUniverses.set(name, state);
             }
         }
@@ -96,7 +96,7 @@ if (fs.existsSync(STATE_FILE)) {
 
 if (!activeUniverses.has('default')) {
     const defState = createEmptyState();
-    defState.universeId = 9999; 
+    defState.universeId = 9999;
     activeUniverses.set('default', defState);
 }
 
@@ -111,7 +111,7 @@ function persistState() {
             radioColors: state.radioColors, relayUniverse: state.relayUniverse
         };
     }
-    fs.writeFile(STATE_FILE, JSON.stringify(stateData), () => {});
+    fs.writeFileSync(config.stateFile, JSON.stringify(stateData));
 }
 
 function getOrInitUniverse(name) {
@@ -180,17 +180,17 @@ function getHostLanIp() {
 app.get(rootPath + '/api/gateway/link', (req, res) => {
     const token = crypto.randomBytes(4).toString('hex'); // 8-char shortlink ID
     const type = req.query.type || 'qr';
-    const ttl = type === 'clipboard' ? 300000 : 45000; // 5 mins vs 45 secs
+    const ttl = type === 'clipboard' ? config.magicTokenTTL.clipboard : config.magicTokenTTL.qr;
     const expires = Date.now() + ttl;
     const target = req.query.target || '';
     const device = req.query.device || 'default';
-    
+
     const lanIp = `${getHostLanIp()}:${PORT}`;
     const joinUrl = `https://${wss_domain}${rootPath}/gateway/join?token=${token}&lan=${lanIp}&target=${encodeURIComponent(target)}`;
-    
+
     magicTokens.set(token, { expires, joinUrl, device, type });
     const shortUrl = `https://${wss_domain}${rootPath}/s/${token}`;
-    
+
     res.json({ url: shortUrl, expires, token, ttl });
 });
 
@@ -218,14 +218,17 @@ app.get(rootPath + '/s/:token', (req, res) => {
 app.get(rootPath + '/gateway/join', (req, res) => {
     const { token, lan, target } = req.query;
     const targetPath = target ? '/' + target : '/connect';
-    
+
     if (!magicTokens.has(token) || magicTokens.get(token).expires < Date.now()) return res.status(401).send("Expired Link");
     magicTokens.delete(token); // Consume the token
-    
-    res.cookie('venue_auth', 'stagehand123', { maxAge: 86400000, httpOnly: true });
+
+    // Create a session for this device (shortlink = pre-authenticated)
+    const { sessionId } = auth.createSession('Shortlink Device');
+    res.cookie(config.cookieName, sessionId, { maxAge: config.cookieMaxAge, httpOnly: true });
+
     const handoffToken = crypto.randomBytes(8).toString('hex');
-    magicTokens.set(handoffToken, { expires: Date.now() + 60000 });
-    
+    magicTokens.set(handoffToken, { expires: Date.now() + 60000, sessionId });
+
     res.send(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
         <body style="background:#11111b;color:#cdd6f4;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
         <div id="status">Routing...</div>
@@ -244,49 +247,60 @@ app.get(rootPath + '/gateway/join', (req, res) => {
 app.get(rootPath + '/gateway/claim', (req, res) => {
     const { token, target } = req.query;
     const targetPath = target ? '/' + target : '/connect';
-    if (magicTokens.has(token) && magicTokens.get(token).expires > Date.now()) {
+    const linkData = magicTokens.get(token);
+    if (linkData && linkData.expires > Date.now()) {
         magicTokens.delete(token);
-        res.cookie('venue_auth', 'stagehand123', { maxAge: 86400000, httpOnly: true });
+        // Re-use the same sessionId from the join step
+        const sessionId = linkData.sessionId || auth.createSession('LAN Device').sessionId;
+        res.cookie(config.cookieName, sessionId, { maxAge: config.cookieMaxAge, httpOnly: true });
         res.redirect(rootPath + targetPath);
-    } else res.redirect(rootPath + '/login');
+    } else res.redirect(rootPath + '/register');
 });
 
-// --- AIRLOCK MIDDLEWARE ---
-app.use((req, res, next) => {
-    if (SECURITY_TIER === 1) return next();
-    
-    const isPublicPath = req.path.startsWith(rootPath + '/gateway/') || 
-                         req.path.startsWith(rootPath + '/s/') || 
-                         req.path === rootPath + '/login' || 
-                         req.path === rootPath + '/api/ping' ||
-                         req.path === rootPath + '/manifest.json' ||
-                         req.path === rootPath + '/sw.js';
-                         
-    if (isPublicPath) return next();
-    if (req.cookies['venue_auth'] === 'stagehand123') return next();
-    if (req.headers.accept?.includes('application/json')) return res.status(401).json({ error: "Auth Required" });
-    res.redirect(rootPath + '/login');
+// --- AUTH MIDDLEWARE (replaces hardcoded airlock) ---
+app.use(auth.createAuthMiddleware(config));
+
+// --- SESSION MANAGEMENT API ---
+app.get(rootPath + '/api/sessions', (req, res) => {
+    res.json({ sessions: auth.getActiveSessions() });
 });
 
-app.get(rootPath + '/login', (req, res) => {
-    res.send(`<!DOCTYPE html><html><body style="background:#11111b; color:#cdd6f4; font-family:sans-serif; display:flex; justify-content:center; align-items:center; height:100vh;">
-        <form method="POST" style="background:#1e1e2e; padding:40px; border-radius:8px; border:1px solid #45475a; text-align:center;">
-            <h2>The Venue Club</h2>
-            <input type="password" name="password" placeholder="Access Code" style="background:#313244; color:white; border:none; padding:10px; border-radius:4px;"><br><br>
-            <button type="submit" style="background:#a6e3a1; border:none; padding:10px 20px; border-radius:4px; cursor:pointer;">ENTER</button>
-        </form></body></html>`);
+app.delete(rootPath + '/api/sessions/:id', (req, res) => {
+    const revoked = auth.revokeSession(req.params.id);
+    if (revoked) res.json({ status: 'revoked' });
+    else res.status(404).json({ error: 'Session not found' });
 });
 
-app.post(rootPath + '/login', (req, res) => {
-    if (req.body.password === 'demo') {
-        res.cookie('venue_auth', 'stagehand123', { maxAge: 86400000, httpOnly: true });
-        res.redirect(rootPath + '/connect');
-    } else res.status(401).send("Unauthorized");
+// --- REGISTRATION (Tier 2) / LOGIN ---
+app.get(rootPath + '/register', (req, res) => {
+    if (config.securityTier === 1) return res.redirect(rootPath + '/connect');
+    if (config.securityTier >= 3) return res.send(auth.notImplementedPageHTML(config.securityTier));
+    res.send(auth.registrationPageHTML(rootPath));
 });
+
+app.post(rootPath + '/register', (req, res) => {
+    if (config.securityTier === 1) return res.redirect(rootPath + '/connect');
+    if (config.securityTier >= 3) return res.status(501).json({ error: 'Not implemented' });
+
+    const { deviceName, totp } = req.body;
+
+    if (!auth.verifyTOTP(totp, config)) {
+        return res.send(auth.registrationPageHTML(rootPath, 'Invalid access code. Please try again.'));
+    }
+
+    const { sessionId } = auth.createSession(deviceName);
+    res.cookie(config.cookieName, sessionId, { maxAge: config.cookieMaxAge, httpOnly: true });
+    res.redirect(rootPath + '/connect');
+});
+
+// Keep /login as an alias for /register (backwards compatibility)
+app.get(rootPath + '/login', (req, res) => res.redirect(rootPath + '/register'));
 
 app.get(rootPath + '/logout', (req, res) => {
-    res.clearCookie('venue_auth');
-    res.redirect(rootPath + '/login');
+    const sessionId = req.cookies?.[config.cookieName];
+    if (sessionId) auth.revokeSession(sessionId);
+    res.clearCookie(config.cookieName);
+    res.redirect(rootPath + '/register');
 });
 
 app.get(rootPath + '/api/ping', (req, res) => res.json({ status: "ok", time: Date.now() }));
@@ -346,6 +360,9 @@ uiWss.on('connection', (ws, request) => {
     const state = getOrInitUniverse(deviceName);
     state.uiClients.add(ws);
 
+    // Track WebSocket against its session for revocation support
+    if (ws.sessionId) auth.trackWebSocket(ws.sessionId, ws);
+
     const isOnline = deviceName === 'default' ? true : !!state.backendClient;
     const isTunneled = request.headers['x-is-tunneled'] === 'true';
 
@@ -353,7 +370,7 @@ uiWss.on('connection', (ws, request) => {
         type: 'init', values: state.values, enabled: state.enabled, protected: state.protected,
         names: state.names, defaultNames: state.defaultNames, glyphs: state.glyphs,
         customLayout: state.customLayout, customLayoutName: state.customLayoutName, serverLayout: state.serverLayout,
-        radioColors: state.radioColors, history: state.history, isOnline, isTunneled, globalMeta: buildGlobalMeta() 
+        radioColors: state.radioColors, history: state.history, isOnline, isTunneled, globalMeta: buildGlobalMeta()
     }));
 
     ws.send(JSON.stringify({ type: 'preset-list', presets: Object.keys(environmentPresets[deviceName] || {}) }));
@@ -361,7 +378,7 @@ uiWss.on('connection', (ws, request) => {
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
-            
+
             // Link Revocation Event
             if (data.type === 'revoke-link') {
                 if (magicTokens.has(data.token)) magicTokens.delete(data.token);
@@ -369,7 +386,7 @@ uiWss.on('connection', (ws, request) => {
             }
 
             if (data.type === 'get-global-meta') return ws.send(JSON.stringify({ type: 'global-meta', meta: buildGlobalMeta() }));
-            
+
             if (data.type === 'update-layout') {
                 state.customLayout = data.layout; persistState();
                 const msg = JSON.stringify({ type: 'layout-sync', layout: state.customLayout });
@@ -401,9 +418,9 @@ uiWss.on('connection', (ws, request) => {
                     if (p.glyphs) state.glyphs = [...p.glyphs];
                     if (p.customLayout) state.customLayout = [...p.customLayout];
                     if (p.customLayoutName) state.customLayoutName = p.customLayoutName;
-                    
-                    persistState(); evaluateRadioGroups(state); triggerRelay(state); 
-                    
+
+                    persistState(); evaluateRadioGroups(state); triggerRelay(state);
+
                     const initMsg = JSON.stringify({
                         type: 'init', values: state.values, enabled: state.enabled, protected: state.protected,
                         names: state.names, defaultNames: state.defaultNames, glyphs: state.glyphs,
@@ -430,7 +447,7 @@ uiWss.on('connection', (ws, request) => {
                 if (!targetState) return;
 
                 const { channel, value, enabled, protected: isProtected, name, source } = data;
-                
+
                 if (channel >= 0 && channel < totalChannels) {
                     let stateChanged = false;
 
@@ -441,7 +458,7 @@ uiWss.on('connection', (ws, request) => {
                         if (value !== undefined && targetState.values[channel] !== value) { targetState.values[channel] = value; stateChanged = true; }
                         if (enabled !== undefined && targetState.enabled[channel] !== enabled) { targetState.enabled[channel] = enabled; stateChanged = true; }
                     }
-                    
+
                     const broadcastMessage = JSON.stringify({ type: 'update', device: targetDeviceName, channel, value, enabled, protected: isProtected, name, source: source || 'human' });
                     broadcastToSubscribers(targetDeviceName, channel, broadcastMessage);
 
@@ -463,15 +480,18 @@ backendWss.on('connection', (ws, request) => {
             if (data.universe !== undefined && data.name) {
                 boundState = getOrInitUniverse(data.name);
                 if (data.radioGroups && Array.isArray(data.radioGroups)) {
-                    let validGlyphs = true;
                     const providedGlyphs = data.glyphs || [];
+                    // Warn on missing glyphs but do NOT reject the connection
                     for (const group of data.radioGroups) {
                         for (const ch of group) {
-                            if (!providedGlyphs[ch] || typeof providedGlyphs[ch] !== 'string' || providedGlyphs[ch].trim() === '') { validGlyphs = false; break; }
+                            if (!providedGlyphs[ch] || typeof providedGlyphs[ch] !== 'string' || providedGlyphs[ch].trim() === '') {
+                                console.warn(`[backend] Missing glyph for radio group channel ${ch} on device "${data.name}" — using fallback.`);
+                                if (!data.glyphs) data.glyphs = [];
+                                const fallbackStyle = "display:flex;align-items:center;justify-content:center;width:100%;height:100%;text-align:center;font-size:0.75em;font-weight:bold;color:#11111b;box-sizing:border-box;padding:2px;background:#585b70;";
+                                data.glyphs[ch] = `<div style="${fallbackStyle}">CH<br>${ch + 1}</div>`;
+                            }
                         }
-                        if (!validGlyphs) break;
                     }
-                    if (!validGlyphs) return (ws.send(JSON.stringify({ type: 'error', message: 'Missing glyphs for radio group channels.' })), ws.close()); 
                 }
 
                 boundState.universeId = data.universe;
@@ -539,9 +559,11 @@ server.on('upgrade', (request, socket, head) => {
         if (ip !== '127.0.0.1' && ip !== '::1' && ip !== '::ffff:127.0.0.1') return (socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'), socket.destroy());
         backendWss.handleUpgrade(request, socket, head, (ws) => backendWss.emit('connection', ws, request));
     } else if (checkPath.startsWith('/ui/')) {
-        if (SECURITY_TIER > 1 && !request.headers.cookie?.includes('venue_auth=stagehand123')) return (socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'), socket.destroy());
+        const wsAuth = auth.validateWebSocket(request, config);
+        if (!wsAuth.valid) return (socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'), socket.destroy());
         uiWss.handleUpgrade(request, socket, head, (ws) => {
             ws.deviceName = checkPath.replace('/ui/', '');
+            ws.sessionId = wsAuth.sessionId;
             uiWss.emit('connection', ws, request);
         });
     } else socket.destroy();
@@ -569,9 +591,9 @@ sacnSocket.on('message', (msg, rinfo) => {
 
     const timestamp = Date.now();
     const targetEntries = Array.from(activeUniverses.entries()).filter(([n, s]) => s.universeId === parsed.universe);
-    
+
     for (const [deviceName, state] of targetEntries) {
-        let valuesChanged = false; 
+        let valuesChanged = false;
         const radioChannels = new Set();
         state.radioGroups.forEach(g => g.forEach(ch => radioChannels.add(ch)));
 
@@ -588,7 +610,7 @@ sacnSocket.on('message', (msg, rinfo) => {
                 if (state.enabled[channel] && !isRadioProtected) {
                     if (state.values[channel] !== newValue) {
                         state.values[channel] = newValue;
-                        valuesChanged = true; 
+                        valuesChanged = true;
                     }
                 }
 
@@ -632,7 +654,7 @@ function getAppVersionHash() {
 
 async function publishToEdgeGateway() {
     try {
-        const tenant = rootPath.substring(1); 
+        const tenant = rootPath.substring(1);
         const files = {};
         const addFile = (name, type, content) => { files[name] = { type, content }; };
 
@@ -642,7 +664,6 @@ async function publishToEdgeGateway() {
         addFile('dmx-console.js', 'application/javascript', fs.readFileSync(path.join(staticDir, 'dmx-console.js'), 'utf8'));
         addFile('manifest.json', 'application/json', fs.readFileSync(path.join(staticDir, 'manifest.json'), 'utf8'));
 
-        // --- BUG FIX: Add the QR Code library to the Edge Payload ---
         try {
             addFile('qrcode.min.js', 'application/javascript', fs.readFileSync(path.join(staticDir, 'qrcode.min.js'), 'utf8'));
         } catch(e) { console.warn("qrcode.min.js not found in static dir, skipping edge publish for this file."); }
@@ -658,7 +679,7 @@ self.addEventListener('activate', (event) => { event.waitUntil(clients.claim());
 self.addEventListener('fetch', (event) => {
     if (event.request.method !== 'GET') return;
     const url = new URL(event.request.url);
-    
+
     // Do not cache API, Gateway, or Shortlink requests
     if (url.pathname.includes('/api/') || url.pathname.includes('/gateway/') || url.pathname.includes('/s/')) return;
 
@@ -687,10 +708,10 @@ self.addEventListener('fetch', (event) => {
         })
     );
 });`;
-        
+
         // 3. Add the generated worker to the payload and serve it locally
         addFile('sw.js', 'application/javascript', swContent);
-        
+
         app.get(rootPath + '/sw.js', (req, res) => {
             res.type('application/javascript');
             res.send(swContent);
@@ -720,10 +741,11 @@ server.listen(PORT, () => {
     } else {
         console.log("Server booting in DEV mode.");
     }
+    console.log(`Security tier: ${config.securityTier}`);
     console.log(`Web UI routing online at http://localhost:${PORT}${rootPath}`);
-    
+
     localServerExpressTunnel(app, wss_domain, rootPath, PORT);
-    
+
     // Trigger the edge push immediately on startup
     publishToEdgeGateway();
 });
