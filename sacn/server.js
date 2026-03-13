@@ -10,7 +10,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import cookieParser from 'cookie-parser';
 
-import { localServerExpressTunnel } from '../../relay-poc/remoteRequest.js'; 
+import { localServerExpressTunnel } from '../../remoteRequest/remoteRequest.js'; 
 import { parseSacnPacket, sacnMulticastAddr, buildSacnPacket } from './sacn.js';
 
 const __filename = fileURLToPath(import.meta.url);
